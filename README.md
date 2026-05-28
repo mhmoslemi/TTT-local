@@ -1,12 +1,10 @@
 # TTT-Discover (Circle Packing) — Local Implementation
 
-A from-scratch reimplementation of *Learning to Discover at Test Time*
-(Yuksekgonul et al., 2026) for the circle-packing problem from
-section 4.1.3 of the paper.
+
 
 ## Model
 
-**Works with any Hugging Face causal language model.** The default is
+**Works with ANY Hugging Face causal language model.** The default is
 `Qwen/Qwen3-8B`; change it in `train.py` (`Config.model_name`) or pass it
 on the command line:
 
