@@ -38,28 +38,8 @@ models), see:
 - [LiquidAI LFM2.5-1.2B-Thinking fine-tuning guide](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Thinking#%F0%9F%94%A7-fine-tuning)
 - [TRL (Transformer Reinforcement Learning)](https://github.com/huggingface/trl) — HuggingFace's library for GRPO, REINFORCE, PPO, and other RL fine-tuning recipes that informed this implementation
 
-## What is preserved from the paper
 
-- **Entropic objective with adaptive β** — bisection over the KL budget
-  γ = ln 2 per group, then leave-one-out entropic advantages (`advantage.py`).
-- **PUCT-style parent sampling** with rank-based prior, max-Q (not mean),
-  lineage-blocked batches, and top-K children per parent (`sampler.py`).
-- **KL penalty against the base policy** via the Tang–Munos
-  zero-mean baselined form, with the LoRA adapter disabled for the base
-  forward pass.
-- **Sandboxed code execution** in a subprocess with a hard timeout,
-  process-group kill on TLE, and BLAS thread caps (`sandbox.py`).
-- **LoRA** with rank 32 (matching the paper).
-- **AdamW** with β = (0.9, 0.95), gradient clipping.
 
-## What differs from the paper
-
-- Runs entirely **locally**. No Tinker, no Ray, no cloud inference APIs.
-- **Any HF model** instead of the paper's gpt-oss-120b.
-- Generation currently runs on a **single GPU** (one response at a time in a
-  Python loop). Parallel generation across multiple GPUs or using vLLM/batched
-  decoding is planned as the next improvement.
-- No async/await, no logging frameworks. Everything prints to the terminal.
 
 ## Output logging
 
@@ -70,7 +50,7 @@ encodes the key hyperparameters and timestamp:
 runs/n10_target1.6294_steps50_g8x64_lr1e-05_T1.1_klc0.1_model-Qwen_Qwen3-8B_20260528-010417/
   config.json                          ← full hyperparameter dump
   step03_group02_rollout017.txt        ← raw model response (the generated Python program)
-  step03_group02_rollout017.meta.json  ← reward, valid, parsed, ran, error msg, advantage, β, ...
+  step03_group02_rollout017.meta.json  ← reward, valid, parsed, ran, error msg, advantage, beta, ...
   ...
   final.summary.json                   ← best value, step, code
   best_code.py                         ← best packing found
@@ -84,8 +64,7 @@ The `.meta.json` files include:
 - `sandbox_stdout` — first 2000 chars of execution output
 - `advantage`, `beta` — training signal for this rollout
 
-This lets you inspect exactly what the model generated and why it received the
-reward it did, at every step.
+
 
 ## Installation
 
@@ -135,7 +114,7 @@ python train.py --backend hf
 |------|---------|
 | `train.py` | Main entry point — config, CLI, training loop |
 | `model_backend.py` | Unsloth ↔ HF+PEFT backends with auto-fallback |
-| `advantage.py` | Entropic adaptive-β advantage via KL-budget bisection |
+| `advantage.py` | Entropic adaptive-beta advantage via KL-budget bisection |
 | `sampler.py` | PUCT archive + state struct |
 | `reward.py` | Validator + reward (sum of radii) |
 | `prompts.py` | Chat-format prompt builder |
