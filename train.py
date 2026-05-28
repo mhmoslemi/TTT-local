@@ -32,15 +32,21 @@ class Config:
     lora_rank: int = 32
     lora_alpha: int = 32
     lora_dropout: float = 0.0
-    target_modules: Tuple[str, ...] = (
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
+    target_modules: Tuple[str, ...] = (  #  for LORA: which weight matrices inside the transformer to attach adapters
+        "q_proj", "k_proj", "v_proj", "o_proj", # attention
+        "gate_proj", "up_proj", "down_proj", # MLP / feed-forward
     )
 
     # Problem
     num_circles: int = 26
     target: float = 2.636
     sandbox_timeout_s: float = 30.0
+
+
+    # max_seq_length (total context = prompt + response)
+    
+    # max_new_tokens only limits the response portion
+    #   -->  higher = fewer truncation failures but slower generation and more memory.
 
     # RL hyperparameters — paper scale
     num_steps: int = 50
@@ -210,7 +216,23 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     from experiment_io import save_rollout
 
     step_t0 = time.time()
-    parents = sampler.sample_states(cfg.groups_per_step)
+
+    parents = sampler.sample_states(cfg.groups_per_step) # PUCT sample G parent, group per step is the size
+    # For every state in the archive, compute the PUCT score
+        #  Q: If never expanded, Q falls back to the state's own value. So a state is "worth" the best thing it has produced.
+        # Scale:  max(value) − min(value) across the archive (_scale()), floored at 1.0 if there's no variance.
+        # P: rank based: w / w.sum()
+        # bonus: sqrt(1+T) / (1+n)
+    # Sort all states by (score, value) descending.
+
+    # IMPORTANT: _full_lineage collects the state's ancestors (from parents) plus all its descendants (BFS down a children map) plus itself. 
+    #     --> Once you pick a state, its whole family tree is blocked from being picked again in this same batch. 
+
+
+    ### KEEP IN MIND FOR LATER -->  The "search" is shallow and breadth-oriented, and its not fully like AlphaZero but similar 
+        # maybe we can do island based later
+
+
     print(f"\n[step {step_idx}] parents picked: {len(parents)}")
     for i, info in enumerate(sampler.last_picks_info):
         tag = "seed" if info["is_seed"] else "expanded"
@@ -226,7 +248,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     rollout_t0 = time.time()
 
     for g, parent in enumerate(parents):
-        sampler.record_expansion(parent)
+        sampler.record_expansion(parent) # record that we expand this parent
 
         messages = build_prompt(
             num_circles=cfg.num_circles,
@@ -246,7 +268,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
                 messages, tokenize=False, add_generation_prompt=True,
             )
 
-        responses, _ = generate_responses(
+        responses, _ = generate_responses(              # for each parent, make K response (group size)
             model, tokenizer, prompt_text, cfg.group_size, cfg
         )
 
@@ -262,11 +284,15 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
             valids.append(out["valid"])
             outs.append(out)
 
+
+
         rewards_np = np.array(rewards, dtype=np.float64)
         advantages, beta = entropic_adaptive_advantages(rewards_np)
         print(f"  group {g}: rewards min={rewards_np.min():.4f} "
               f"mean={rewards_np.mean():.4f} max={rewards_np.max():.4f}  "
               f"valid={sum(valids)}/{len(valids)}  β={beta:.4f}")
+
+
 
         # Save every rollout (response + meta) to disk for debugging
         for r_idx, (text, gen_ids) in enumerate(responses):
@@ -333,15 +359,18 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     total_logp_delta = 0.0
     n_examples = len(all_examples)
 
-    for ex in all_examples:
+    for ex in all_examples:  # roll outs that we want to train on
         pid = ex["prompt_ids"]
         rid = ex["response_ids"]
-        adv = ex["advantage"]
+        adv = ex["advantage"] # the entropic advantage of this rollout
 
         # Current policy logprobs (with grad)
-        cur_lp = compute_token_logprobs(model, pid, rid, with_grad=True)  # (R,)
+        # ---> asks the current policy (base + LoRA): "what log-probability did you assign to the token that was actually generated here?" 
+        cur_lp = compute_token_logprobs(model, pid, rid, with_grad=True)  # (R,) 
+        # ---> cur_lp[k] = log \pi_\theta (token_k | everything before it).
 
         # Base policy logprobs (LoRA disabled)
+        # Disabling LoRA is how we get the base model's logprobs, which is the reference distribution the KL penalty measures drift against.
         try:
             with backend.disable_adapter(), torch.no_grad():
                 base_lp = compute_token_logprobs(model, pid, rid, with_grad=False)
@@ -351,6 +380,8 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
                 print(f"[warn] disable_adapter failed ({e}); training without KL penalty")
                 train_step._kl_warned = True
             base_lp = cur_lp.detach()
+
+
 
         # KL correction (Tang–Munos baselined form):
         # advantage_per_token = adv + kl_coef * (mean(logp_diff) - logp_diff_per_token)
@@ -435,6 +466,7 @@ def main():
 
     # ---- sampler ----
     from sampler import PUCTSampler
+    # At init, all seeds are identical: value 0, empty code, n=0, no Q. They differ only by their random id.
     sampler = PUCTSampler(
         num_seeds=cfg.num_seed_states,
         puct_c=cfg.puct_c,

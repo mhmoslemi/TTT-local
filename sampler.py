@@ -45,7 +45,7 @@ class State:
             timestep=timestep,
             value=value,
             code=code,
-            parents=parents or [],
+            parents=parents or [], # all the parents not just one
             is_seed=is_seed,
         )
 
