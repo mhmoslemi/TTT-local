@@ -100,6 +100,15 @@ For Unsloth (optional but recommended), follow the
 matching your CUDA version. If it fails, the script falls back to plain
 transformers + PEFT automatically.
 
+> [!CAUTION]
+> **<font color="red">After setting up the Unsloth environment, you MUST install the remaining dependencies inside that same environment using `uv pip`:</font>**
+>
+> ```bash
+> uv pip install -r requirements.txt
+> ```
+>
+> **<font color="red">The LLM-generated Python programs are executed locally in a subprocess. If the packages (`numpy`, `scipy`, etc.) are not present in the active environment, every generated program will fail at runtime and all rewards will be zero.</font>**
+
 ## Usage
 
 ```bash
@@ -108,13 +117,6 @@ python train.py
 
 # Change model
 python train.py --model-name "LiquidAI/LFM2.5-350M"
-
-# Conservative: fits a 16 GB GPU
-python train.py --groups-per-step 2 --group-size 8
-
-# Tiny smoke test
-python train.py --num-steps 2 --groups-per-step 1 --group-size 2 \
-                --max-new-tokens 256
 
 # n=10 problem (easier, good for validating the training loop)
 python train.py --num-circles 10 --target 1.6294 --temperature 1.1
@@ -125,19 +127,9 @@ python train.py --num-circles 26 --target 2.636
 # Force plain HF backend (useful if Unsloth is broken on your system)
 python train.py --backend hf
 
-# 4-bit quantization (reduces VRAM by ~50%, slight quality loss)
-python train.py --load-in-4bit
-
-# All flags
-python train.py --help
 ```
 
-Pre-written run scripts:
 
-```bash
-bash run.sh    # n=10 run, 50 steps, paper-scale groups
-bash run2.sh   # n=26 run, 50 steps, paper-scale groups
-```
 
 ## Files
 
@@ -152,19 +144,3 @@ bash run2.sh   # n=26 run, 50 steps, paper-scale groups
 | `sandbox.py` | Subprocess code execution with timeout (no Ray) |
 | `experiment_io.py` | Per-run directory creation and rollout logging |
 
-## Expectations
-
-With a single 24 GB GPU and smaller-scale settings:
-- The model should start producing valid packings within a few steps.
-- Best sum of radii should climb noticeably over 50 steps.
-- For n=26, the human SOTA is 2.635983; a well-tuned run might reach 2.0–2.5.
-
-The paper-scale settings (8 groups × 64 rollouts) require substantial VRAM for
-an 8B model. Reduce via `--groups-per-step` and `--group-size` on smaller
-hardware, or use `--load-in-4bit`.
-
-## License
-
-Code in this directory is original except for the `validate_packing`
-function and circle-packing problem framing, which match the paper's
-`examples/circle_packing/env.py`.
