@@ -1,16 +1,16 @@
 """
-Entropic objective with adaptive β.
+Entropic objective with adaptive \beta.
 
 Paper section 3.2: instead of optimizing the expected reward, we optimize
 
-    J_β(θ; s) = log E_{a~π_θ}[exp(β · R(s,a))]
+    J_\beta(\theta; s) = log E_{a~\pi_\theta}[exp(\beta · R(s,a))]
 
 The gradient gives a reweighted policy gradient with weights
 
-    w_β(a) = exp(β·R(a)) / E[exp(β·R)]
-    A(a)   = w_β(a) - 1                # baselined advantage
+    w_\beta(a) = exp(\beta·R(a)) / E[exp(\beta·R)]
+    A(a)   = w_\beta(a) - 1                # baselined advantage
 
-As β → ∞, this picks out the single best action. The trick is choosing β
+As \beta → inf, this picks out the single best action. The trick is choosing \beta
 adaptively for each parent
 
 Implementation is done using ideas from discover/ttt_discover/rl/train.py::compute_advantages
@@ -23,7 +23,7 @@ import numpy as np
 
 def _kl_to_uniform(beta: float, rewards: np.ndarray) -> float:
     """
-    KL(q_β || uniform) where q_β(i) ∝ exp(β * r_i).
+    KL(q_\beta || uniform) where q_\beta(i) ->  exp(\beta * r_i).
     Numerically stabilized by subtracting r.max().
     """
     K = len(rewards)
@@ -31,7 +31,7 @@ def _kl_to_uniform(beta: float, rewards: np.ndarray) -> float:
         return 0.0
     logK = math.log(K)
     logits = beta * (rewards - rewards.max())
-    # log q_β
+    # log q_\beta
     log_Z = np.log(np.exp(logits).sum())
     log_q = logits - log_Z
     q = np.exp(log_q)
@@ -63,16 +63,16 @@ def entropic_adaptive_advantages(
     if K < 2 or float(r.max() - r.min()) < eps:
         return np.zeros_like(r), 0.0
 
-    # Step 1: find β with KL(q_β || uniform) = gamma via bisection
+    # Step 1: find \beta with KL(q_\beta || uniform) = gamma via bisection
     lo, hi = 0.0, 1.0
 
-    # If even hi=1 has KL > gamma, then β is in (0, 1)
+    # If even hi=1 has KL > gamma, then \beta is in (0, 1)
     if _kl_to_uniform(hi, r) < gamma:
         # Need to grow hi until KL exceeds gamma
         while hi < beta_max and _kl_to_uniform(hi, r) < gamma:
             hi *= 2.0
         if _kl_to_uniform(hi, r) < gamma:
-            # Saturated; β = beta_max (effectively argmax)
+            # Saturated; \beta = beta_max (effectively argmax)
             beta = hi
         else:
             beta = None
@@ -89,8 +89,8 @@ def entropic_adaptive_advantages(
         beta = hi
 
     # Step 2: LOO entropic weights
-    # w_n = e^{β(r_n - r_max)} / Z_{-n}
-    # where Z_{-n} = (sum_m e^{β(r_m - r_max)} - e^{β(r_n - r_max)}) / (K-1)
+    # w_n = e^{\beta(r_n - r_max)} / Z_{-n}
+    # where Z_{-n} = (sum_m e^{\beta(r_m - r_max)} - e^{\beta(r_n - r_max)}) / (K-1)
     shift = r - r.max()
     e = np.exp(beta * shift)
     total = e.sum()
@@ -113,12 +113,12 @@ if __name__ == "__main__":
     print(f"one outlier -> adv={a}, beta={b:.4f}")
     print(f"  sum adv (should ~= 0 in expectation but is LOO so not exactly): {a.sum():.4f}")
 
-    # Case 3: small differences -> β grows large, still concentrates on best
+    # Case 3: small differences -> \beta grows large, still concentrates on best
     r = np.array([1.0, 1.001, 1.002, 1.003])
     a, b = entropic_adaptive_advantages(r)
     print(f"small diffs -> adv={a}, beta={b:.4f}")
 
-    # Case 4: large spread -> β is small (KL budget hits fast)
+    # Case 4: large spread -> \beta is small (KL budget hits fast)
     r = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
     a, b = entropic_adaptive_advantages(r)
     print(f"big spread -> adv={a}, beta={b:.4f}")
