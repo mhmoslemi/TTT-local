@@ -1,8 +1,6 @@
 """
 Prompt construction for the circle-packing problem.
 
-We keep the prompt SHORT and concrete. Small code models do much better
-with focused instructions than long ones with lots of background.
 """
 
 

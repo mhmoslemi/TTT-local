@@ -1,30 +1,11 @@
 """
 TTT-Discover for Circle Packing — runs locally.
 
-No async, no Ray, no Tinker, no logging frameworks.
-  - LFM2.5-350M via either Unsloth (fast) or plain HF+PEFT (fallback)
-  - Subprocess sandbox for code execution
-  - PUCT sampler for parent selection
-  - Entropic adaptive β for advantage computation
 
-Defaults are paper-scale: 50 steps × 8 groups × 64 rollouts.
-On a single consumer GPU you'll probably want to scale down — every knob
-is a CLI flag, see --help.
+Defaults hyperparams as paper. 
 
-Quick examples:
-
-    # Default (paper-scale)
-    python train.py
-
-    # Smaller for a 16 GB GPU
-    python train.py --groups-per-step 2 --group-size 8
-
-    # Force the plain HF backend (no Unsloth)
-    python train.py --backend hf
-
-    # Different problem size
-    python train.py --num-circles 32 --target 2.940
 """
+
 
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -37,20 +18,16 @@ from typing import Tuple
 
 import numpy as np
 
-# torch is imported lazily after we pick a backend (because Unsloth
-# wants to monkey-patch transformers before they get imported).
-
 
 # ======================================================================
 # Config
 # ======================================================================
 @dataclass
 class Config:
-
     # Model
-    model_name: str =  'Qwen/Qwen3-4B'    # "Qwen/Qwen3-8B"  #"Qwen/Qwen2.5-Coder-1.5B-Instruct" # "LiquidAI/LFM2.5-350M"
+    model_name: str = "Qwen/Qwen3-8B"
     backend: str = "auto"        # "auto" | "unsloth" | "hf"
-    max_seq_length: int = 32768
+    max_seq_length: int = 32000
     load_in_4bit: bool = False
     lora_rank: int = 32
     lora_alpha: int = 32
@@ -69,18 +46,12 @@ class Config:
     num_steps: int = 50
     groups_per_step: int = 8
     group_size: int = 64
-    num_seed_states: int = 8           # paper uses several seeds for diversity
-    learning_rate: float = 4e-5
+    num_seed_states: int = 8           
+    learning_rate: float = 1e-5
     kl_penalty_coef: float = 0.1
     max_new_tokens: int = 2048
     grad_clip: float = 1.0
 
-
-
-
-    # Mini-batching for the training step (to control activation memory):
-    # we accumulate grads over examples but each forward is one example.
-    # If you want a true mini-batch, set this > 1 (no big benefit for now).
     train_examples_per_microbatch: int = 1
 
     # Sampling
@@ -94,7 +65,7 @@ class Config:
 
     # Misc
     seed: int = 42
-    print_responses: int = 0           # how many rollouts to print per step (debug)
+    print_responses: int = 0           # how many rollouts to print per step
 
 
 # ======================================================================
@@ -116,7 +87,7 @@ def parse_args_into_cfg() -> Config:
     p.add_argument("--num-circles", type=int, default=cfg.num_circles)
     p.add_argument("--target", type=float, default=cfg.target)
     p.add_argument("--sandbox-timeout-s", type=float, default=cfg.sandbox_timeout_s)
-    # Scale knobs — the ones you'll actually tweak
+    # Scale knobs 
     p.add_argument("--num-steps", type=int, default=cfg.num_steps,
                    help="Number of TTT-Discover steps (paper: 50)")
     p.add_argument("--groups-per-step", type=int, default=cfg.groups_per_step,
@@ -170,7 +141,7 @@ def generate_responses(model, tokenizer, prompt_text: str, group_size: int, cfg:
     Generate `group_size` responses from a single prompt.
     Returns list of (text, gen_token_ids) and the prompt length in tokens.
     """
-    import torch  # local import; backend has been loaded by now
+    import torch  
     inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
     input_len = inputs.input_ids.shape[1]
 
@@ -228,13 +199,15 @@ def compute_token_logprobs(model, prompt_ids, response_ids, with_grad: bool):
 # ======================================================================
 # One training step
 # ======================================================================
-def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int, cfg: Config):
+def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
+               cfg: Config, exp_dir):
     import torch
 
     from advantage import entropic_adaptive_advantages
     from reward import compute_reward, extract_python_code
     from prompts import build_prompt
     from sampler import State
+    from experiment_io import save_rollout
 
     step_t0 = time.time()
     parents = sampler.sample_states(cfg.groups_per_step)
@@ -261,9 +234,8 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int, cfg
             parent_value=parent.value or 0.0,
             target=cfg.target,
         )
-        # For Qwen3 (a hybrid thinking model), pass enable_thinking=False so the
-        # model doesn't waste the token budget on <think>...</think>. The kwarg
-        # is silently ignored by templates that don't recognize it.
+        # For Qwen3, enable_thinking=False so the
+        # model doesn't waste the token budget on <think>...</think>.
         try:
             prompt_text = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True,
@@ -281,29 +253,40 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int, cfg
         rewards = []
         codes = []
         valids = []
+        outs = []
         for r_idx, (text, _) in enumerate(responses):
             out = compute_reward(text, num_circles=cfg.num_circles,
                                  timeout_s=cfg.sandbox_timeout_s)
             rewards.append(out["reward"])
             codes.append(extract_python_code(text) or "")
             valids.append(out["valid"])
-            if r_idx < cfg.print_responses:
-                print(f"  [g{g}/r{r_idx}] reward={out['reward']:.4f} "
-                      f"valid={out['valid']} msg={out['msg']}")
-                # Dump the actual response (truncated) so we can debug
-                snippet = text if len(text) < 1500 else text[:750] + "\n... [truncated] ...\n" + text[-750:]
-                print(f"  --- raw response (g{g}/r{r_idx}) ---")
-                print(snippet)
-                print(f"  --- end raw response ---")
-                if out["stdout"]:
-                    stdout_snippet = out["stdout"][:500]
-                    print(f"  --- sandbox stdout ---\n{stdout_snippet}\n  --- end stdout ---")
+            outs.append(out)
 
         rewards_np = np.array(rewards, dtype=np.float64)
         advantages, beta = entropic_adaptive_advantages(rewards_np)
         print(f"  group {g}: rewards min={rewards_np.min():.4f} "
               f"mean={rewards_np.mean():.4f} max={rewards_np.max():.4f}  "
               f"valid={sum(valids)}/{len(valids)}  β={beta:.4f}")
+
+        # Save every rollout (response + meta) to disk for debugging
+        for r_idx, (text, gen_ids) in enumerate(responses):
+            meta = {
+                "step": step_idx,
+                "group": g,
+                "rollout": r_idx,
+                "reward": float(rewards[r_idx]),
+                "valid": bool(valids[r_idx]),
+                "parsed": bool(outs[r_idx]["parsed"]),
+                "ran": bool(outs[r_idx]["ran"]),
+                "msg": outs[r_idx]["msg"],
+                "advantage": float(advantages[r_idx]) if hasattr(advantages, "__len__") else 0.0,
+                "beta": float(beta),
+                "n_response_tokens": len(gen_ids),
+                "sandbox_stdout": outs[r_idx].get("stdout", "")[:2000],
+                "parent_value": float(parent.value) if parent.value is not None else None,
+                "parent_is_seed": parent.id in sampler._seed_ids,
+            }
+            save_rollout(exp_dir, step_idx, g, r_idx, text, meta)
 
         # Children for the sampler
         for r_idx, (_, _) in enumerate(responses):
@@ -425,13 +408,17 @@ def main():
     print(f"Max new tokens:     {cfg.max_new_tokens}")
     print("=" * 70)
 
+    # ---- experiment dir ----
+    from experiment_io import make_experiment_dir, save_final_summary
+    exp_dir = make_experiment_dir(cfg)
+    print(f"[init] writing all rollouts to: {exp_dir}")
+
     # ---- backend + model ----
-    # Load backend FIRST so Unsloth can patch transformers if used.
     from model_backend import load_backend
     backend = load_backend(cfg.backend, cfg)
     model, tokenizer = backend.load()
 
-    import torch  # safe to import now
+    import torch  
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -459,7 +446,7 @@ def main():
 
     # ---- main loop ----
     for step in range(cfg.num_steps):
-        train_step(backend, model, tokenizer, sampler, optimizer, step, cfg)
+        train_step(backend, model, tokenizer, sampler, optimizer, step, cfg, exp_dir)
 
     # ---- summary ----
     print("\n" + "=" * 70)
@@ -470,8 +457,11 @@ def main():
         print(f"Best sum of radii: {best.value:.6f}")
         print(f"Found at step:     {best.timestep}")
         print(f"\n--- best code ---\n{best.code}\n--- end ---")
+        save_final_summary(exp_dir, best.value, best.code, best.timestep)
     else:
         print("No valid packing was ever produced.")
+        save_final_summary(exp_dir, None, None, None)
+    print(f"\nAll outputs saved under: {exp_dir}")
 
 
 if __name__ == "__main__":

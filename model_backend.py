@@ -2,9 +2,8 @@
 Two interchangeable model backends:
 
   - "unsloth": uses Unsloth's FastLanguageModel. Faster training, faster
-    inference, lower memory. Doesn't support every architecture yet —
-    if it can't load LFM2 it'll raise on import or on .from_pretrained.
-
+    inference, lower memory. 
+    
   - "hf": plain transformers + PEFT. Slower but supports anything that
     has a HuggingFace AutoModelForCausalLM implementation.
 

@@ -106,14 +106,35 @@ class PUCTSampler:
                     queue.append(c)
         return lineage
 
+    # def _scale(self):
+    #     vals = np.array([
+    #         s.value for s in self._states
+    #         if s.id not in self._seed_ids and s.value is not None
+    #     ])
+    #     if vals.size == 0:
+    #         return 1.0
+    #     return float(max(vals.max() - vals.min(), 1e-6))
+
+
     def _scale(self):
-        vals = np.array([
-            s.value for s in self._states
-            if s.id not in self._seed_ids and s.value is not None
-        ])
-        if vals.size == 0:
+        # Include seed states to establish a baseline range, 
+        # or fallback to 1.0 if the array has no variance.
+        vals = np.array([s.value for s in self._states if s.value is not None])
+        
+        if len(vals) < 2:
             return 1.0
-        return float(max(vals.max() - vals.min(), 1e-6))
+            
+        val_range = vals.max() - vals.min()
+        
+        # If all states have the exact same reward (mode collapse), 
+        # prevent the scale from squashing the PUCT bonus.
+        if val_range < 1e-6:
+            return 1.0
+            
+        return float(val_range)
+
+
+
 
     def _prior(self, values):
         """Rank-based: best gets (N), worst gets 1; normalize to a distribution."""

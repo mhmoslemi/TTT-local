@@ -1,7 +1,7 @@
 """
 Run model-generated code in a subprocess with a hard timeout.
 
-We write the code to a temp file, then spawn a Python subprocess that:
+Write the code to a temp file, then spawn a Python subprocess that:
   1. imports the file
   2. calls the named entrypoint function
   3. pickles the return value to a results file
@@ -9,7 +9,6 @@ We write the code to a temp file, then spawn a Python subprocess that:
 The parent process reads the pickle when the child exits cleanly, or
 kills the child (and its process group) on timeout.
 
-No async, no Ray. Just subprocess + signal.
 """
 
 import os
@@ -22,7 +21,6 @@ import tempfile
 import time
 
 
-# This is what gets written to disk and executed in the child.
 # Placeholders __PROGRAM_PATH__ / __FUNCTION_NAME__ / __RESULTS_PATH__
 # are substituted before launch.
 RUNNER_TEMPLATE = r'''
@@ -121,7 +119,7 @@ def run_code(code: str, entrypoint: str, timeout_s: float, max_cpus: int = 1):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-        start_new_session=True,  # so we can kill the whole group
+        start_new_session=True, 
     )
 
     try:

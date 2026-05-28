@@ -11,10 +11,9 @@ The gradient gives a reweighted policy gradient with weights
     A(a)   = w_β(a) - 1                # baselined advantage
 
 As β → ∞, this picks out the single best action. The trick is choosing β
-adaptively for each parent: we enforce that the tilted distribution q_β
-stays within KL budget γ = ln 2 of the uniform-over-batch distribution.
+adaptively for each parent
 
-Implementation matches discover/ttt_discover/rl/train.py::compute_advantages
+Implementation is done using ideas from discover/ttt_discover/rl/train.py::compute_advantages
 under the `entropic_adaptive_beta` branch.
 """
 
