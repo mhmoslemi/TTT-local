@@ -6,9 +6,6 @@ We run one persistent worker process per GPU. Each worker:
   - wraps it with the current LoRA adapter (loaded from a file on disk)
   - generates its share of rollouts with batched model.generate()
   - reloads the adapter from disk at the start of each step (weight sync)
-  - returns per-token behavior logprobs alongside the tokens, so the trainer
-    can apply an importance-sampling correction for the generation/scoring
-    backend mismatch (plain HF here vs Unsloth in the main process)
 
 The MAIN process (in train.py) keeps the Unsloth model for TRAINING only.
 Each step it saves the LoRA adapter to a directory, then asks the pool to
@@ -20,9 +17,7 @@ No async. Plain torch.multiprocessing with persistent workers and queues.
 Protocol (per step):
   main -> worker[w].task_queue:   (step, adapter_path, jobs, gen_kwargs)
        where jobs = [(group_idx, prompt_text, num_samples), ...]
-  worker[w] -> result_queue:      (rank, [(group_idx, text, token_ids,
-                                           behavior_logprobs), ...])
-       where behavior_logprobs is a per-token list aligned 1:1 with token_ids
+  worker[w] -> result_queue:      (rank, [(group_idx, text, token_ids), ...])
 """
 
 import os
@@ -143,42 +138,14 @@ def _worker_loop(rank, gpu_id, model_name, max_seq_length, load_in_4bit,
                     temperature=gen_kwargs["temperature"],
                     top_p=gen_kwargs["top_p"],
                     pad_token_id=pad_id,
-                    return_dict_in_generate=True,
-                    output_scores=True,
                 )
-            seqs = out.sequences                    # (count, input_len + gen_len)
-            gen_token_ids = seqs[:, input_len:]     # (count, gen_len)
-            # out.scores: tuple (len gen_len) of (count, vocab) tensors, the
-            # per-step logits AFTER temperature/top_p warping, i.e. the actual
-            # sampling distribution. At temperature=1.0 and top_p=1.0 (the
-            # defaults) warping is the identity, so these equal the raw model
-            # logprobs and the IS ratio in training is a clean
-            # pi_learner / pi_sampler.
-            #
-            # Gather PER STEP, never stack the full (count, gen_len, vocab)
-            # tensor: for a ~150k vocab and gen_len ~4k that stack is tens of GB
-            # and would OOM the worker. Per-step peak is one (count, vocab) slice.
-            n_seq = seqs.shape[0]
-            gen_len = min(gen_token_ids.shape[1], len(out.scores))
-            tok_logprobs = torch.empty(
-                (n_seq, gen_len), dtype=torch.float32, device=device
-            )
-            for t in range(gen_len):
-                step_lp = out.scores[t].float().log_softmax(dim=-1)   # (count, vocab)
-                tok_logprobs[:, t] = step_lp.gather(
-                    1, gen_token_ids[:, t : t + 1]
-                ).squeeze(1)
-                del step_lp
-
-            for i in range(n_seq):
-                gen_ids = gen_token_ids[i].tolist()[:gen_len]
-                lps = tok_logprobs[i].tolist()[:gen_len]
+            # out shape: (count, input_len + gen_len)
+            for i in range(out.shape[0]):
+                gen_ids = out[i, input_len:].tolist()
                 if eos_id is not None and eos_id in gen_ids:
-                    cut = gen_ids.index(eos_id) + 1
-                    gen_ids = gen_ids[:cut]
-                    lps = lps[:cut]
+                    gen_ids = gen_ids[: gen_ids.index(eos_id) + 1]
                 text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-                results.append((group_idx, text, gen_ids, lps))
+                results.append((group_idx, text, gen_ids))
 
         result_queue.put((rank, results))
 
@@ -227,9 +194,8 @@ class GenerationPool:
         """
         prompts_by_group: list of prompts, one per group.
 
-        Returns: dict group_idx -> list of (text, token_ids, behavior_logprobs),
-        each list of length group_size (order within a group is not meaningful).
-        behavior_logprobs is a per-token list aligned 1:1 with token_ids.
+        Returns: dict group_idx -> list of (text, token_ids), each list of
+        length group_size (order within a group is not meaningful).
         """
         num_groups = len(prompts_by_group)
         worker_jobs = distribute_jobs(prompts_by_group, group_size, self.num_workers)
@@ -249,8 +215,8 @@ class GenerationPool:
         by_group = {g: [] for g in range(num_groups)}
         for _ in range(active):
             rank, results = self.result_queue.get()
-            for (group_idx, text, token_ids, behavior_logprobs) in results:
-                by_group[group_idx].append((text, token_ids, behavior_logprobs))
+            for (group_idx, text, token_ids) in results:
+                by_group[group_idx].append((text, token_ids))
 
         return by_group
 

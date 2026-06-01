@@ -12,13 +12,14 @@
 
 
 # python train.py --num-circles 10 --target 1.6294 \
-CUDA_VISIBLE_DEVICES=1 python train_multy.py --num-circles 10 \
-                --num-steps 1 \
-                --groups-per-step 1 \
-                --group-size 1 \
-                --max-new-tokens 500 \
-                --temperature 1.1 \
-                --max-seq-length 40000 \
-                --model-name openai/gpt-oss-120b
+python train_multy.py --num-circles 26 \
+                --num-steps 3 \
+                --groups-per-step 8 \
+                --group-size 64 \
+                --max-new-tokens 6700 \
+                --temperature 1 
+                # \
+                # --max-seq-length 40000 \
+                # --model-name openai/gpt-oss-120b
             #    --model-name LiquidAI/LFM2.5-1.2B-Base \
 #                --model-name LiquidAI/LFM2.5-350M

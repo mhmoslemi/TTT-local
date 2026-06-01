@@ -365,10 +365,6 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         # Multi-GPU path: save current LoRA adapter, then generate all groups
         # in parallel across all workers. We save every step (including step 0,
         # so workers use the same LoRA-wrapped policy the main process has).
-        #
-        # Workers now also return per-token behavior logprobs (the sampling
-        # distribution), so the training step can apply an importance-sampling
-        # correction for the HF-generation vs Unsloth-scoring backend mismatch.
         adapter_path = _save_adapter(model, exp_dir, step_idx)
 
         group_responses = gen_pool.generate_groups(
@@ -381,15 +377,13 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         )
     else:
         # Single-GPU fallback path: sequential generation in this process.
-        # Genuinely on-policy (same model, same backend, no lag), so the IS
-        # ratio is exactly 1. Tag behavior logprobs None to mean "no correction".
         backend.set_inference_mode()
         group_responses = {}
         for g, prompt_text in enumerate(prompts_by_group):
             responses, _ = generate_responses(
                 model, tokenizer, prompt_text, cfg.group_size, cfg
             )
-            group_responses[g] = [(t, ids, None) for (t, ids) in responses]
+            group_responses[g] = responses
 
     # ----- SCORE + ADVANTAGE + SAVE + COLLECT TRAINING EXAMPLES -----
     for g, parent in enumerate(parents):
@@ -400,7 +394,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         codes = []
         valids = []
         outs = []
-        for r_idx, (text, _, _) in enumerate(responses):
+        for r_idx, (text, _) in enumerate(responses):
             out = compute_reward(text, num_circles=cfg.num_circles,
                                  timeout_s=cfg.sandbox_timeout_s)
             rewards.append(out["reward"])
@@ -415,7 +409,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
               f"valid={sum(valids)}/{len(valids)}  β={beta:.4f}")
 
         # Save every rollout (response + meta) to disk for debugging
-        for r_idx, (text, gen_ids, _) in enumerate(responses):
+        for r_idx, (text, gen_ids) in enumerate(responses):
             meta = {
                 "step": step_idx,
                 "group": g,
@@ -435,7 +429,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
             save_rollout(exp_dir, step_idx, g, r_idx, text, meta)
 
         # Children for the sampler
-        for r_idx, (_, _, _) in enumerate(responses):
+        for r_idx, (_, _) in enumerate(responses):
             if valids[r_idx] and codes[r_idx]:
                 child = State.make(
                     timestep=step_idx,
@@ -449,19 +443,14 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
             continue
 
         prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(model.device)
-        for (text, gen_ids, behavior_lps), adv in zip(responses, advantages):
+        for (text, gen_ids), adv in zip(responses, advantages):
             if len(gen_ids) == 0:
                 continue
             response_ids = torch.tensor([gen_ids], device=model.device)
-            behavior_lp_tensor = (
-                torch.tensor(behavior_lps, device=model.device, dtype=torch.float32)
-                if behavior_lps is not None else None
-            )
             all_examples.append({
                 "prompt_ids": prompt_ids,
                 "response_ids": response_ids,
                 "advantage": float(adv),
-                "behavior_logprobs": behavior_lp_tensor,
             })
 
     rollout_time = time.time() - rollout_t0
@@ -483,14 +472,6 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     total_loss = 0.0
     total_logp_delta = 0.0
     n_examples = len(all_examples)
-
-    # IS-ratio diagnostics (multi-GPU only). With no policy lag, this ratio
-    # measures only the HF-generation vs Unsloth-scoring numerical gap at the
-    # same weights, so it should sit at ~1.0. A mean far from 1, or a large max,
-    # means either a real backend gap or a token-alignment bug in the worker.
-    is_ratio_sum = 0.0
-    is_ratio_max = 0.0
-    is_ratio_count = 0
 
     for ex in all_examples:
         pid = ex["prompt_ids"]
@@ -518,29 +499,11 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         kl_adv = cfg.kl_penalty_coef * (avg_logp_diff - (cur_lp - base_lp))
         eff_adv = adv + kl_adv  # broadcasts scalar adv over (R,) kl_adv
 
-        # Importance-sampling correction for the sampler/learner mismatch.
-        # behavior_logprobs is None on the single-GPU path (on-policy) -> ratio 1.
-        behavior_lp = ex.get("behavior_logprobs")
-        if behavior_lp is not None and behavior_lp.shape[0] == cur_lp.shape[0]:
-            # Detached ratio: it reweights the surrogate, it is not differentiated.
-            # In gradient this equals the PPO-style form when ratio ~ 1, which is
-            # the regime here (numerical backend gap, no policy lag).
-            is_ratio = torch.exp(cur_lp.detach() - behavior_lp)
-            is_ratio_sum += float(is_ratio.mean().item())
-            is_ratio_max = max(is_ratio_max, float(is_ratio.max().item()))
-            is_ratio_count += 1
-        else:
-            if behavior_lp is not None and not hasattr(train_step, "_is_len_warned"):
-                print(f"[warn] behavior/current logprob length mismatch "
-                      f"({behavior_lp.shape[0]} vs {cur_lp.shape[0]}); "
-                      f"skipping IS for affected examples")
-                train_step._is_len_warned = True
-            is_ratio = 1.0
-
-        # Loss: -E_token[ IS_ratio * advantage_token * logprob_token ]
-        loss = -(is_ratio * eff_adv.detach() * cur_lp).mean()
-        # Average (not sum) grads over the rollouts accumulated this step.
+        # Loss: -E_token[advantage_token * logprob_token]
+        loss = -(eff_adv.detach() * cur_lp).mean()
+        # loss.backward()
         (loss / n_examples).backward()
+
 
         total_loss += float(loss.detach().item())
         total_logp_delta += float(logp_diff.mean().item())
@@ -554,13 +517,9 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     optimizer.step()
 
     train_time = time.time() - train_t0
-    is_msg = ""
-    if is_ratio_count > 0:
-        is_msg = (f"  IS ratio mean={is_ratio_sum / is_ratio_count:.4f} "
-                  f"max={is_ratio_max:.3f}")
     print(f"[step {step_idx}] train time: {train_time:.1f}s  "
           f"avg loss: {total_loss / n_examples:.4f}  "
-          f"avg logπ_θ - logπ_base: {total_logp_delta / n_examples:.4f}{is_msg}")
+          f"avg logπ_θ - logπ_base: {total_logp_delta / n_examples:.4f}")
 
     best = sampler.best_state()
     if best is not None:
