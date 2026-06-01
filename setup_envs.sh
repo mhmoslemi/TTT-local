@@ -95,7 +95,7 @@ build_env_old() {
 build_unsloth() {
     local dir="$UNSLOTH_DIR"
     require_virtualenv
-    local py; py="$(find_python 3.13)"
+    local py; py="$(find_python 3.12)"
     echo "==> Creating unsloth_env at '$dir' with $py"
     virtualenv -p "$py" "$dir"
     "$dir/bin/pip" install --upgrade pip
