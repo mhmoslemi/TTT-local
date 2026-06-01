@@ -1,0 +1,166 @@
+<strategy>
+To improve the packing of 26 circles in a unit square and achieve a target sum of radii of approximately 2.635983, we can implement the following enhancements to the original algorithm:
+
+1. **Improve Initial Packing Strategy**: 
+   - Instead of a hybrid square-hexagonal packing, we use a more refined algorithm to place the initial layout in a hexagonal close-packed arrangement within the square to better utilize the available space.
+
+2. **Refine Optimization Process**:
+   - Employ a combination of global and local optimizers to escape local maxima and refine the solution.
+   - Use differential evolution as a global optimizer for initial exploration of the search space, followed by Sequential Least Squares Programming (SLSQP) for fine-tuning the radii and positions.
+
+3. **Refine Constraints and Optimization Parameters**:
+   - Improve the constraint formulation to avoid numerical issues and handle tighter tolerance.
+   - Allow for slight adjustments in positions and radii, especially for circles near the square boundaries.
+
+4. **Boundary and Corner Optimization**:
+   - Explicitly prioritize placing and resizing circles near the square boundaries and corners to better utilize the space.
+
+5. **Enhance Initial Radius Estimation**:
+   - Compute an initial radius estimate using a more refined formula that considers the packing density and number of circles.
+
+6. **Refine Final Validation**:
+   - Add a validation step that ensures the final configuration has minimal overlapping or boundary violations, with a tolerance suitable for numerical precision.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import math
+
+def run_packing():
+    num_circles = 26
+
+    # Define an improved hexagonal packing to fill the square more efficiently
+    def hexagonal_packing(num_circles):
+        # Hexagonal close packing in a square
+        row_count = int(np.ceil(np.sqrt(num_circles)))
+        col_count = int(np.ceil(num_circles / row_count))
+        spacing_x = 1.0 / (col_count + 1)
+        spacing_y = 1.0 / (row_count + 1)
+        centers = np.zeros((num_circles, 2))
+        idx = 0
+        for i in range(row_count):
+            for j in range(col_count):
+                if idx >= num_circles:
+                    break
+                if i % 2 == 0:
+                    x = j * spacing_x + spacing_x / 2.0
+                else:
+                    x = (j + 0.5) * spacing_x
+                y = i * spacing_y + spacing_y / 2.0
+                centers[idx] = [x, y]
+                idx += 1
+        return centers
+
+    # Initial layout
+    centers = hexagonal_packing(num_circles)
+    # Compute initial radius estimate based on hexagonal packing
+    # Approximate radius using circle diameter based on spacing
+    initial_radius = 0.25  # This will be optimized
+    radii = np.full(num_circles, initial_radius)
+
+    # Objective function to maximize sum of radii
+    def objective(params):
+        flat_params = params.reshape(-1)
+        centers_opt = flat_params[:num_circles * 2].reshape((num_circles, 2))
+        radii_opt = flat_params[num_circles * 2:].reshape((num_circles,))
+        return -np.sum(radii_opt)  # Minimization of negative sum
+
+    # Constraint functions
+    def constraint_boundary(circle_data):
+        x, y, r = circle_data
+        if x - r < -1e-12 or x + r > 1 + 1e-12 or y - r < -1e-12 or y + r > 1 + 1e-12:
+            return -1.0  # Constraint violation
+        return 0.0
+
+    def constraint_overlap(circle1, circle2):
+        x1, y1, r1 = circle1
+        x2, y2, r2 = circle2
+        dx = x1 - x2
+        dy = y1 - y2
+        dist = math.sqrt(dx**2 + dy**2)
+        if dist < r1 + r2 - 1e-12:
+            return -1.0  # Constraint violation
+        return 0.0
+
+    # Bounds for parameters
+    bounds = []
+    for _ in range(num_circles):
+        bounds.append((0.0, 1.0))  # x
+        bounds.append((0.0, 1.0))  # y
+        bounds.append((0.0, 1.0))  # radius
+
+    # Flatten initial centers and radii for optimization
+    initial_guess = np.concatenate([centers.flatten(), radii])
+
+    # Create constraints for boundary constraints
+    constraints = []
+    for i in range(num_circles):
+        var_indices = [i * 3, i * 3 + 1, i * 3 + 2]
+
+        def constraint_boundary_func(x):
+            circle_data = x[var_indices]
+            return constraint_boundary(circle_data)
+
+        constraints.append({'type': 'ineq', 'fun': constraint_boundary_func})
+
+    # Create constraints for overlap between pairs
+    for i in range(num_circles):
+        for j in range(i + 1, num_circles):
+            var_indices_i = [i * 3, i * 3 + 1, i * 3 + 2]
+            var_indices_j = [j * 3, j * 3 + 1, j * 3 + 2]
+
+            def constraint_overlap_func(x):
+                circle1 = x[var_indices_i]
+                circle2 = x[var_indices_j]
+                return constraint_overlap(circle1, circle2)
+
+            constraints.append({'type': 'ineq', 'fun': constraint_overlap_func})
+
+    # Run optimization using a combination of global and local optimizers
+    # First, perform a global search with differential evolution
+    result_global = opt.differential_evolution(
+        objective,
+        bounds,
+        constraints=constraints,
+        strategy='best1bin',
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.8,
+        tol=1e-10,
+        maxiter=100,
+        polish=True,
+        disp=False
+    )
+
+    # Use SLSQP to fine-tune the result
+    result_local = opt.minimize(
+        objective,
+        result_global.x,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        tol=1e-10,
+        options={'maxiter': 1000}
+    )
+
+    # Extract optimized centers and radii
+    optimized = result_local.x
+    centers_opt = optimized[:num_circles * 2].reshape((num_circles, 2))
+    radii_opt = optimized[num_circles * 2:].reshape((num_circles,))
+
+    # Validate the packing
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        print(f"Validation failed: {message}")
+        # Fallback to initial layout if optimization fails
+        centers_opt = centers
+        radii_opt = radii
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            print(f"Initial layout also failed: {message}")
+            return np.zeros((26, 2)), np.zeros(26), 0.0
+
+    sum_radii = np.sum(radii_opt)
+    return centers_opt, radii_opt, sum_radii
+```

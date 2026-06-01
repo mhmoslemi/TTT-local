@@ -1,0 +1,272 @@
+<strategy>
+To improve the circle packing in the unit square, we can adopt a more sophisticated and informed strategy that builds on the existing approach but enhances it with several key improvements:
+
+1. **Initial Layout Optimization**: 
+   - Replace the initial randomly generated hexagonal layout with a more informed placement that considers both symmetry and boundary utilization. We can start by placing circles in a hexagonal tight packing within the square, but also ensure the layout respects the boundaries of the square by clipping circles that might be partially or fully outside of it.
+
+2. **Boundary Utilization**:
+   - Improve how circles are placed near the boundaries and corners of the square. This will help maximize the area each circle can occupy without overlapping others or going out of bounds.
+
+3. **Hybrid Packing Arrangement**:
+   - Consider using a hybrid packing strategy that combines:
+     - **Hexagonal packing** for the majority of the circles in the interior,
+     - **Boundary-packing** for circles near the edges,
+     - **Corner-packing** for circles in the corners.
+   - This approach should better utilize the square space and minimize wasted space.
+
+4. **Refinement Methodology**:
+   - Employ a more efficient and powerful optimization technique to refine the packing, such as:
+     - A **multi-phase optimization** that first performs a genetic algorithm for coarse searching, then applies a **sequential quadratic programming** (SLSQP) optimization for fine-tuning.
+     - Use **constraints** more effectively to enforce validity and prevent overlaps during optimization.
+
+5. **Adaptive Parameter Tuning**:
+   - Tune the mutation rate, population size, and number of generations in the genetic algorithm to better converge on a valid packing close to the maximum radii sum.
+
+6. **Constraint Enforcement**:
+   - Add better constraints for validation and boundary control, ensuring that no circle exceeds the unit square or overlaps with any other circle, even under slight parameter perturbations.
+
+7. **Initial Guess Optimization**:
+   - The initial guess is a critical factor in the optimization process. Improving the initial guess by placing circles optimally near the square borders and corners can significantly improve the sum of the radii.
+
+8. **Post-refinement Check**:
+   - After refinement, we perform a final validation step that ensures the configuration is valid and satisfies all constraints.
+   - If invalid, we consider a fallback to a slightly perturbed version that maintains feasibility.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import math
+import random
+import itertools
+
+def run_packing():
+    num_circles = 26
+
+    def improved_initial_layout(num_circles):
+        # Compute the ideal spacing
+        max_possible_radius = 1.0 / (2 * (np.sqrt(num_circles) + 1)) * 1.2
+        centers = np.zeros((num_circles, 2))
+        idx = 0
+        rows = int(np.ceil(np.sqrt(num_circles)))
+        cols = int(np.ceil(num_circles / rows))
+
+        # Generate primary hexagonal grid for most circles
+        for i in range(rows):
+            for j in range(cols):
+                if idx >= num_circles:
+                    break
+                # Alternate row spacing for hexagonal grid
+                if i % 2 == 0:
+                    x = j * (2 * max_possible_radius) + max_possible_radius
+                else:
+                    x = j * (2 * max_possible_radius) + max_possible_radius + max_possible_radius
+                y = i * (np.sqrt(3) * max_possible_radius) + max_possible_radius
+                centers[idx] = [x, y]
+                idx += 1
+
+        # Place extra circles near boundaries for better utilization
+        extra_circles = num_circles - idx
+        for _ in range(extra_circles):
+            # Generate random points near the square boundaries
+            while True:
+                x = np.random.uniform(0, 1)
+                y = np.random.uniform(0, 1)
+                dist_to_boundary = min(x, 1 - x, y, 1 - y)
+                if dist_to_boundary >= max_possible_radius:
+                    break
+            centers[idx] = [x, y]
+            idx += 1
+
+        # Adjust radii based on distance to boundaries
+        initial_radii = np.full(num_circles, max_possible_radius)
+        for i in range(num_circles):
+            x, y = centers[i]
+            dist_to_boundary = min(x, 1 - x, y, 1 - y)
+            if dist_to_boundary < max_possible_radius:
+                initial_radii[i] = dist_to_boundary
+
+        return centers, initial_radii
+
+    def validate_packing(centers, radii):
+        n = centers.shape[0]
+
+        # Check for NaN values
+        if np.isnan(centers).any() or np.isnan(radii).any():
+            return False, "NaN values present"
+
+        # Check for negative radii
+        for i in range(n):
+            if radii[i] < 0:
+                return False, f"Circle {i} has negative radius {radii[i]}"
+
+        # Check for boundary violations
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            if (x - r < -1e-12 or x + r > 1 + 1e-12 or
+                y - r < -1e-12 or y + r > 1 + 1e-12):
+                return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+        # Check for overlaps between circles
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i][0] - centers[j][0]
+                dy = centers[i][1] - centers[j][1]
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return False, f"Circles {i} and {j} overlap"
+
+        return True, "ok"
+
+    def objective(params):
+        flat_params = params.reshape(-1)
+        centers_opt = flat_params[:num_circles * 2].reshape((num_circles, 2))
+        radii_opt = flat_params[num_circles * 2:].reshape((num_circles,))
+        return -np.sum(radii_opt)  # Minimization of negative sum
+
+    def genetic_algorithm(num_circles):
+        population_size = 200
+        mutation_rate = 0.1
+        generations = 300
+
+        # Initial population
+        population = []
+        for _ in range(population_size):
+            centers, radii = improved_initial_layout(num_circles)
+            params = np.concatenate([centers.flatten(), radii])
+            population.append(params)
+
+        for generation in range(generations):
+            # Evaluate fitness
+            fitness = []
+            for params in population:
+                centers_opt = params[:num_circles * 2].reshape((num_circles, 2))
+                radii_opt = params[num_circles * 2:].reshape((num_circles,))
+                is_valid, message = validate_packing(centers_opt, radii_opt)
+                if not is_valid:
+                    fitness.append(-np.inf)
+                else:
+                    fitness.append(np.sum(radii_opt))
+
+            # Select parents
+            parents = np.argsort(fitness)[-int(population_size / 2):]
+            parents = [population[i] for i in parents]
+
+            # Create offspring
+            offspring = []
+            for _ in range(population_size - len(parents)):
+                parent1 = random.choice(parents)
+                parent2 = random.choice(parents)
+                child = np.copy(parent1)
+                for i in range(len(child)):
+                    if random.random() < mutation_rate:
+                        child[i] += np.random.uniform(-0.01, 0.01)
+                offspring.append(child)
+
+            # Replace population
+            population = parents + offspring
+
+        # Evaluate final population
+        best_params = None
+        best_fitness = -np.inf
+        for params in population:
+            centers_opt = params[:num_circles * 2].reshape((num_circles, 2))
+            radii_opt = params[num_circles * 2:].reshape((num_circles,))
+            is_valid, message = validate_packing(centers_opt, radii_opt)
+            if not is_valid:
+                continue
+            current_fitness = np.sum(radii_opt)
+            if current_fitness > best_fitness:
+                best_fitness = current_fitness
+                best_params = params
+
+        return best_params if best_params is not None else improved_initial_layout(num_circles)[0]
+
+    def refine_optimization(centers, radii):
+        # Define bounds for each variable
+        bounds = []
+        for i in range(num_circles):
+            x, y = centers[i]
+            r = radii[i]
+            x_low = max(0, x - r)
+            x_high = min(1, x + r)
+            y_low = max(0, y - r)
+            y_high = min(1, y + r)
+            r_low = max(0, r - 0.01)
+            r_high = min(1, r + 0.01)
+            bounds.extend([(x_low, x_high), (y_low, y_high), (r_low, r_high)])
+        
+        # Define constraints
+        def constraints(x):
+            # Flatten x
+            flat_x = x.reshape(-1)
+            centers_opt = flat_x[:num_circles * 2].reshape((num_circles, 2))
+            radii_opt = flat_x[num_circles * 2:].reshape((num_circles,))
+            
+            # Check for boundary violations
+            for i in range(num_circles):
+                x, y = centers_opt[i]
+                r = radii_opt[i]
+                if (x - r < -1e-12 or x + r > 1 + 1e-12 or
+                    y - r < -1e-12 or y + r > 1 + 1e-12):
+                    return -1.0
+            
+            # Check for overlaps
+            for i in range(num_circles):
+                for j in range(i + 1, num_circles):
+                    dx = centers_opt[i][0] - centers_opt[j][0]
+                    dy = centers_opt[i][1] - centers_opt[j][1]
+                    dist = np.sqrt(dx**2 + dy**2)
+                    if dist < radii_opt[i] + radii_opt[j] - 1e-12:
+                        return -1.0
+            
+            return 0.0
+
+        # Set initial guess
+        initial_guess = np.concatenate([centers.flatten(), radii])
+
+        # Use SLSQP optimization
+        result = opt.minimize(
+            objective,
+            initial_guess,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraints}
+        )
+
+        if result.success:
+            return result.x[:num_circles * 2].reshape((num_circles, 2)), result.x[num_circles * 2:].reshape((num_circles,))
+        else:
+            return centers, radii
+
+    # Run the genetic algorithm
+    centers, radii = improved_initial_layout(num_circles)
+    best_params = genetic_algorithm(num_circles)
+    centers_opt = best_params[:num_circles * 2].reshape((num_circles, 2))
+    radii_opt = best_params[num_circles * 2:].reshape((num_circles,))
+
+    # Validate the packing
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        print(f"Validation failed: {message}")
+        # Fallback to initial layout if optimization fails
+        centers_opt = centers
+        radii_opt = radii
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            print(f"Initial layout also failed: {message}")
+            return np.zeros((26, 2)), np.zeros(26), 0.0
+
+    # Refine with SLSQP
+    centers_opt, radii_opt = refine_optimization(centers_opt, radii_opt)
+
+    # Validate the refined packing
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        print(f"Refined layout failed: {message}")
+        return np.zeros((26, 2)), np.zeros(26), 0.0
+
+    sum_radii = np.sum(radii_opt)
+    return centers_opt, radii_opt, sum_radii
+```
