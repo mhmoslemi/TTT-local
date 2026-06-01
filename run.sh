@@ -12,7 +12,7 @@
 
 
 # python train.py --num-circles 10 --target 1.6294 \
-CUDA_VISIBLE_DEVICES=5 python train.py --num-circles 10 \
+CUDA_VISIBLE_DEVICES=1 python train_multy.py --num-circles 10 \
                 --num-steps 1 \
                 --groups-per-step 1 \
                 --group-size 1 \

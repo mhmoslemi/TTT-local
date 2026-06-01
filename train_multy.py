@@ -94,8 +94,10 @@ class Config:
     print_responses: int = 0           # how many rollouts to print per step (debug)
 
     # Multi-GPU generation
-    num_gpus: int = 8
-    gpu_ids: str = "0,1,2,3,4,5,6,7"
+    # num_gpus: int = 8
+    num_gpus: int = 1
+    # gpu_ids: str = "0,1,2,3,4,5,6,7"
+    gpu_ids: str = "0"
 
 
 
@@ -339,8 +341,9 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
 
     # ----- BUILD PROMPTS (one per parent/group) -----
     prompts_by_group = []
+    
     for g, parent in enumerate(parents):
-        sampler.record_expansion(parent)
+        sampler.record_expansion(parent, count=cfg.group_size)
         messages = build_prompt(
             num_circles=cfg.num_circles,
             parent_code=parent.code,
@@ -501,7 +504,9 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
 
         # Loss: -E_token[advantage_token * logprob_token]
         loss = -(eff_adv.detach() * cur_lp).mean()
-        loss.backward()
+        # loss.backward()
+        (loss / n_examples).backward()
+
 
         total_loss += float(loss.detach().item())
         total_logp_delta += float(logp_diff.mean().item())
@@ -568,6 +573,7 @@ def main():
         lr=cfg.learning_rate,
         betas=(0.9, 0.95),
         eps=1e-8,
+        weight_decay=0.0
     )
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())

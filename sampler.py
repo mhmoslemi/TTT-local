@@ -106,34 +106,32 @@ class PUCTSampler:
                     queue.append(c)
         return lineage
 
+
     # def _scale(self):
-    #     vals = np.array([
-    #         s.value for s in self._states
-    #         if s.id not in self._seed_ids and s.value is not None
-    #     ])
-    #     if vals.size == 0:
+    #     vals = np.array([s.value for s in self._states if s.value is not None])
+        
+    #     if len(vals) < 2:
     #         return 1.0
-    #     return float(max(vals.max() - vals.min(), 1e-6))
+            
+    #     val_range = vals.max() - vals.min()
+        
+    #     # If all states have the exact same reward (mode collapse), 
+    #     # prevent the scale from squashing the PUCT bonus.
+    #     if val_range < 1e-6:
+    #         return 1.0
+            
+    #     return float(val_range)
 
 
     def _scale(self):
-        # Include seed states to establish a baseline range, 
-        # or fallback to 1.0 if the array has no variance.
-        vals = np.array([s.value for s in self._states if s.value is not None])
-        
-        if len(vals) < 2:
-            return 1.0
-            
-        val_range = vals.max() - vals.min()
-        
-        # If all states have the exact same reward (mode collapse), 
-        # prevent the scale from squashing the PUCT bonus.
-        if val_range < 1e-6:
-            return 1.0
-            
-        return float(val_range)
 
-
+        vals = np.array([
+            s.value for s in self._states
+            if s.id not in self._seed_ids and s.value is not None
+        ])
+        if vals.size == 0:
+            return 1.0
+        return float(max(vals.max() - vals.min(), 1e-6))
 
 
     def _prior(self, values):
@@ -283,13 +281,26 @@ class PUCTSampler:
             keep_non_seeds = non_seeds[: self.max_buffer_size - len(seeds)]
             self._states = seeds + keep_non_seeds
 
-    def record_expansion(self, parent: State):
-        """Called once per parent that was expanded this step
-        (regardless of whether the rollout succeeded)."""
+    # def record_expansion(self, parent: State):
+    #     """Called once per parent that was expanded this step
+    #     (regardless of whether the rollout succeeded)."""
+    #     anc_ids = [parent.id] + [p["id"] for p in (parent.parents or [])]
+    #     for aid in anc_ids:
+    #         self._n[aid] = self._n.get(aid, 0) + 1
+    #     self._T += 1
+
+
+    def record_expansion(self, parent: State, count: int = 1):
+        """Called once per parent per step. Pass count=group_size so n and T
+        grow per-ROLLOUT (n[p]+=64, T+=512 per step at 8x64), matching discover,
+        which increments once per rollout in update_states / record_failed_rollout.
+        count=1 gives per-parent growth (n[p]+=1, T+=8), which is the paper's
+        Appendix A.2 prose but NOT what their code does."""
         anc_ids = [parent.id] + [p["id"] for p in (parent.parents or [])]
         for aid in anc_ids:
-            self._n[aid] = self._n.get(aid, 0) + 1
-        self._T += 1
+            self._n[aid] = self._n.get(aid, 0) + count
+        self._T += count
+
 
     def best_state(self):
         non_seeds = [s for s in self._states if s.id not in self._seed_ids]
