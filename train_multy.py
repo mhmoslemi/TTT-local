@@ -1,29 +1,7 @@
 """
-TTT-Discover for Circle Packing — runs locally.
+TTT-Discover — multi-problem local runner.
 
-No async, no Ray, no Tinker, no logging frameworks.
-  - LFM2.5-350M via either Unsloth (fast) or plain HF+PEFT (fallback)
-  - Subprocess sandbox for code execution
-  - PUCT sampler for parent selection
-  - Entropic adaptive β for advantage computation
-
-Defaults are paper-scale: 50 steps × 8 groups × 64 rollouts.
-On a single consumer GPU you'll probably want to scale down — every knob
-is a CLI flag, see --help.
-
-Quick examples:
-
-    # Default (paper-scale)
-    python train.py
-
-    # Smaller for a 16 GB GPU
-    python train.py --groups-per-step 2 --group-size 8
-
-    # Force the plain HF backend (no Unsloth)
-    python train.py --backend hf
-
-    # Different problem size
-    python train.py --num-circles 32 --target 2.940
+Config():  defaults  <  YAML  <  CLI flags
 """
 
 import warnings
@@ -33,13 +11,10 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 import os
 import argparse
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Tuple
-
 import numpy as np
-
-# torch is imported lazily after we pick a backend (because Unsloth
-# wants to monkey-patch transformers before they get imported).
+import yaml
 
 
 # ======================================================================
@@ -47,6 +22,15 @@ import numpy as np
 # ======================================================================
 @dataclass
 class Config:
+    # Problem selector
+    problem: str = "circle_packing" 
+    
+        # "circle_packing", "erdos", "ac1", "ac2",
+        # "denoising", "gpu_mode", "ahc",
+
+
+    problem_type: str = ""        # ac1/ac2, trimul/mla_decode_nvidia, etc.
+
     # Model
     model_name: str = "Qwen/Qwen3-8B"
     backend: str = "auto"        # "auto" | "unsloth" | "hf"
@@ -60,24 +44,21 @@ class Config:
         "gate_proj", "up_proj", "down_proj",
     )
 
-    # Problem
+
     num_circles: int = 26
     target: float = 2.635983
     sandbox_timeout_s: float = 30.0
 
-    # RL hyperparameters — paper scale
+    # RL hyperparameters
     num_steps: int = 50
     groups_per_step: int = 8
     group_size: int = 64
-    num_seed_states: int = 8           # paper uses several seeds for diversity
+    num_seed_states: int = 8           
     learning_rate: float = 4e-5
     kl_penalty_coef: float = 0.1
     max_new_tokens: int = 4200
     grad_clip: float = 1.0
 
-    # Mini-batching for the training step (to control activation memory):
-    # we accumulate grads over examples but each forward is one example.
-    # If you want a true mini-batch, set this > 1 (no big benefit for now).
     train_examples_per_microbatch: int = 1
 
     # Sampling
@@ -91,7 +72,7 @@ class Config:
 
     # Misc
     seed: int = 42
-    print_responses: int = 0           # how many rollouts to print per step (debug)
+    print_responses: int = 0           # how many rollouts to print per step 
 
     # Multi-GPU generation
     num_gpus: int = 8
@@ -99,78 +80,107 @@ class Config:
 
 
 # ======================================================================
-# CLI parsing
+# CLI parsing + config loading (defaults < YAML < CLI)
 # ======================================================================
-def parse_args_into_cfg() -> Config:
-    cfg = Config()
-    p = argparse.ArgumentParser(description="TTT-Discover for circle packing")
-    # Backend
-    p.add_argument("--backend", choices=["auto", "unsloth", "hf"], default=cfg.backend)
-    p.add_argument("--model-name", default=cfg.model_name)
-    p.add_argument("--load-in-4bit", action="store_true", default=cfg.load_in_4bit)
-    p.add_argument("--max-seq-length", type=int, default=cfg.max_seq_length)
-    # LoRA
-    p.add_argument("--lora-rank", type=int, default=cfg.lora_rank)
-    p.add_argument("--lora-alpha", type=int, default=cfg.lora_alpha)
-    p.add_argument("--lora-dropout", type=float, default=cfg.lora_dropout)
-    # Problem
-    p.add_argument("--num-circles", type=int, default=cfg.num_circles)
-    p.add_argument("--target", type=float, default=cfg.target)
-    p.add_argument("--sandbox-timeout-s", type=float, default=cfg.sandbox_timeout_s)
-    # Scale knobs — the ones you'll actually tweak
-    p.add_argument("--num-steps", type=int, default=cfg.num_steps,
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="TTT-Discover multi-problem runner")
+    # Problem selection
+    p.add_argument("--problem", default="circle_packing",
+                   help="Problem name. Loads configs/<problem>.yaml unless --config is given. "
+                        "One of: circle_packing, erdos, ac1, ac2, denoising, gpu_mode.")
+    p.add_argument("--config", default=None,
+                   help="Explicit path to a YAML config (overrides the --problem lookup).")
+    p.add_argument("--problem-type", default=None,
+                   help="Sub-type for multi-mode problems (ac1/ac2, trimul/mla_decode_nvidia).")
+
+    # CLI overrides — all default None so we can tell 'not given' from 'given'.
+    p.add_argument("--backend", choices=["auto", "unsloth", "hf"], default=None)
+    p.add_argument("--model-name", default=None)
+    p.add_argument("--load-in-4bit", action="store_const", const=True, default=None)
+    p.add_argument("--max-seq-length", type=int, default=None)
+    p.add_argument("--lora-rank", type=int, default=None)
+    p.add_argument("--lora-alpha", type=int, default=None)
+    p.add_argument("--lora-dropout", type=float, default=None)
+    p.add_argument("--num-circles", type=int, default=None)
+    p.add_argument("--target", type=float, default=None)
+    p.add_argument("--sandbox-timeout-s", type=float, default=None)
+    p.add_argument("--num-steps", type=int, default=None,
                    help="Number of TTT-Discover steps (paper: 50)")
-    p.add_argument("--groups-per-step", type=int, default=cfg.groups_per_step,
+    p.add_argument("--groups-per-step", type=int, default=None,
                    help="Number of parent states sampled per step (paper: 8)")
-    p.add_argument("--group-size", type=int, default=cfg.group_size,
+    p.add_argument("--group-size", type=int, default=None,
                    help="Rollouts per parent per step (paper: 64)")
-    p.add_argument("--num-seed-states", type=int, default=cfg.num_seed_states)
-    p.add_argument("--max-new-tokens", type=int, default=cfg.max_new_tokens)
-    # Optimization
-    p.add_argument("--lr", type=float, default=cfg.learning_rate)
-    p.add_argument("--kl-penalty-coef", type=float, default=cfg.kl_penalty_coef)
-    p.add_argument("--grad-clip", type=float, default=cfg.grad_clip)
-    # Sampling
-    p.add_argument("--temperature", type=float, default=cfg.temperature)
-    p.add_argument("--top-p", type=float, default=cfg.top_p)
-    # Misc
-    p.add_argument("--seed", type=int, default=cfg.seed)
-    p.add_argument("--print-responses", type=int, default=cfg.print_responses)
-    # Multi-GPU generation
-    p.add_argument("--num-gpus", type=int, default=cfg.num_gpus,
+    p.add_argument("--num-seed-states", type=int, default=None)
+    p.add_argument("--max-new-tokens", type=int, default=None)
+    p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--kl-penalty-coef", type=float, default=None)
+    p.add_argument("--grad-clip", type=float, default=None)
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--top-p", type=float, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--print-responses", type=int, default=None)
+    p.add_argument("--num-gpus", type=int, default=None,
                    help="Number of GPUs for parallel generation. 1 = single-process "
                         "in-line generation (no worker pool). >1 spawns that many "
                         "plain-HF generation workers, one per GPU.")
-    p.add_argument("--gpu-ids", type=str, default=cfg.gpu_ids,
+    p.add_argument("--gpu-ids", type=str, default=None,
                    help="Comma-separated physical GPU ids for the workers, e.g. "
                         "'0,1,2,3,4,5,6,7'. Defaults to 0..num_gpus-1.")
-    args = p.parse_args()
+    return p
 
-    cfg.backend = args.backend
-    cfg.model_name = args.model_name
-    cfg.load_in_4bit = args.load_in_4bit
-    cfg.max_seq_length = args.max_seq_length
-    cfg.lora_rank = args.lora_rank
-    cfg.lora_alpha = args.lora_alpha
-    cfg.lora_dropout = args.lora_dropout
-    cfg.num_circles = args.num_circles
-    cfg.target = args.target
-    cfg.sandbox_timeout_s = args.sandbox_timeout_s
-    cfg.num_steps = args.num_steps
-    cfg.groups_per_step = args.groups_per_step
-    cfg.group_size = args.group_size
-    cfg.num_seed_states = args.num_seed_states
-    cfg.max_new_tokens = args.max_new_tokens
-    cfg.learning_rate = args.lr
-    cfg.kl_penalty_coef = args.kl_penalty_coef
-    cfg.grad_clip = args.grad_clip
-    cfg.temperature = args.temperature
-    cfg.top_p = args.top_p
-    cfg.seed = args.seed
-    cfg.print_responses = args.print_responses
-    cfg.num_gpus = args.num_gpus
-    cfg.gpu_ids = args.gpu_ids
-    return cfg
+
+# CLI arg name -> config key (only where they differ)
+_CLI_TO_CFG = {"lr": "learning_rate"}
+
+
+def load_config():
+    """
+    Merge Config() defaults < YAML(configs/<problem>.yaml or --config) < CLI flags.
+
+    Returns (cfg, merged) where:
+      cfg    is a Config built from the engine-level fields, and
+      merged is the full dict (including problem-only keys like num_circles,
+             problem_type, budget_s, score_scale, gpu_type, task_yaml, lib_dir),
+             which is what the problem registry consumes.
+    """
+    args = _build_arg_parser().parse_args()
+
+    # 1) defaults from the dataclass
+    merged = {f.name: getattr(Config(), f.name) for f in fields(Config)}
+
+    # 2) YAML overlay
+    cfg_path = args.config or os.path.join("configs", f"{args.problem}.yaml")
+    ydict = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            ydict = yaml.safe_load(f) or {}
+        merged.update(ydict)
+        print(f"[config] loaded {cfg_path}")
+    elif args.config is not None:
+        raise FileNotFoundError(f"--config path not found: {cfg_path}")
+    else:
+        print(f"[config] no YAML at {cfg_path}; using Config() defaults + CLI")
+
+    # The registry routing key is the YAML's `problem` field when present
+    # (this lets e.g. configs/gpu_mode_trimul.yaml declare `problem: gpu_mode`
+    # while --problem just selects the file). With no YAML, --problem is the key.
+    merged["problem"] = ydict.get("problem", args.problem)
+
+    # 3) CLI overlay (only explicitly-provided values)
+    skip = {"problem", "config", "problem_type"}
+    for arg_name, value in vars(args).items():
+        if arg_name in skip or value is None:
+            continue
+        key = _CLI_TO_CFG.get(arg_name, arg_name)
+        merged[key] = value
+    if args.problem_type is not None:
+        merged["problem_type"] = args.problem_type
+
+    # 4) build the Config from the fields it knows; leave the rest in `merged`
+    known = {f.name for f in fields(Config)}
+    cfg_kwargs = {k: v for k, v in merged.items() if k in known}
+    cfg = Config(**cfg_kwargs)
+    return cfg, merged
 
 
 # ======================================================================
@@ -196,8 +206,6 @@ def _generate_batch(model, tokenizer, inputs, input_len, n_samples, cfg):
             pad_token_id=pad_id,
             num_return_sequences=n_samples,
         )
-    # out shape: (n_samples, input_len + gen_len). All share the same prompt,
-    # so the prompt occupies the first input_len columns for every row.
     results = []
     for i in range(out.shape[0]):
         gen_ids = out[i, input_len:].tolist()
@@ -212,7 +220,7 @@ def generate_responses(model, tokenizer, prompt_text: str, group_size: int, cfg:
     """
     Generate `group_size` responses from a single prompt, batched.
 
-    We try to generate all `group_size` at once. If that OOMs, we halve the
+    Try to generate all `group_size` at once. If OOMs, halve the
     per-call batch size and retry, accumulating until we have group_size
     responses. This keeps the algorithm identical (still group_size IID
     samples from the same policy) while using the GPU in parallel.
@@ -315,14 +323,13 @@ def _save_adapter(model, exp_dir, step_idx):
 # One training step
 # ======================================================================
 def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
-               cfg: Config, exp_dir, gen_pool=None):
+               cfg: Config, exp_dir, problem, gen_pool=None):
     import torch
 
     from advantage import entropic_adaptive_advantages
-    from reward import compute_reward, extract_python_code
-    from prompts import build_prompt
     from sampler import State
     from experiment_io import save_rollout
+    from problems.base import ParentContext
 
     step_t0 = time.time()
     parents = sampler.sample_states(cfg.groups_per_step)
@@ -338,15 +345,18 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
 
     # ----- BUILD PROMPTS (one per parent/group) -----
     prompts_by_group = []
-    
+    parent_ctxs = []
+
     for g, parent in enumerate(parents):
         sampler.record_expansion(parent, count=cfg.group_size)
-        messages = build_prompt(
-            num_circles=cfg.num_circles,
-            parent_code=parent.code,
-            parent_value=parent.value or 0.0,
-            target=cfg.target,
+        pc = ParentContext(
+            code=parent.code,
+            value=parent.value if parent.value is not None else 0.0,
+            raw_score=parent.raw_score,
+            construction=parent.construction,
         )
+        parent_ctxs.append(pc)
+        messages = problem.build_prompt(pc)
         try:
             prompt_text = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True,
@@ -381,8 +391,8 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         )
     else:
         # Single-GPU fallback path: sequential generation in this process.
-        # Genuinely on-policy (same model, same backend, no lag), so the IS
-        # ratio is exactly 1. Tag behavior logprobs None to mean "no correction".
+        # On-policy (same model, same backend, no lag), so the IS ratio is
+        # exactly 1. Tag behavior logprobs None to mean "no correction".
         backend.set_inference_mode()
         group_responses = {}
         for g, prompt_text in enumerate(prompts_by_group):
@@ -395,40 +405,42 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     for g, parent in enumerate(parents):
         prompt_text = prompts_by_group[g]
         responses = group_responses[g]
+        pc = parent_ctxs[g]
 
         rewards = []
         codes = []
         valids = []
-        outs = []
+        outs = []        # list of RewardResult
         for r_idx, (text, _, _) in enumerate(responses):
-            out = compute_reward(text, num_circles=cfg.num_circles,
-                                 timeout_s=cfg.sandbox_timeout_s)
-            rewards.append(out["reward"])
-            codes.append(extract_python_code(text) or "")
-            valids.append(out["valid"])
-            outs.append(out)
+            res = problem.compute_reward(text, pc, cfg.sandbox_timeout_s)
+            rewards.append(res.reward)
+            codes.append(res.code or "")
+            valids.append(res.valid)
+            outs.append(res)
 
         rewards_np = np.array(rewards, dtype=np.float64)
         advantages, beta = entropic_adaptive_advantages(rewards_np)
         print(f"  group {g}: rewards min={rewards_np.min():.4f} "
               f"mean={rewards_np.mean():.4f} max={rewards_np.max():.4f}  "
-              f"valid={sum(valids)}/{len(valids)}  β={beta:.4f}")
+              f"valid={sum(valids)}/{len(valids)}  beta={beta:.4f}")
 
         # Save every rollout (response + meta) to disk for debugging
         for r_idx, (text, gen_ids, _) in enumerate(responses):
+            res = outs[r_idx]
             meta = {
                 "step": step_idx,
                 "group": g,
                 "rollout": r_idx,
                 "reward": float(rewards[r_idx]),
+                "raw_score": (float(res.raw_score) if res.raw_score is not None else None),
                 "valid": bool(valids[r_idx]),
-                "parsed": bool(outs[r_idx]["parsed"]),
-                "ran": bool(outs[r_idx]["ran"]),
-                "msg": outs[r_idx]["msg"],
+                "parsed": bool(res.parsed),
+                "ran": bool(res.ran),
+                "msg": res.msg,
                 "advantage": float(advantages[r_idx]) if hasattr(advantages, "__len__") else 0.0,
                 "beta": float(beta),
                 "n_response_tokens": len(gen_ids),
-                "sandbox_stdout": outs[r_idx].get("stdout", "")[:2000],
+                "sandbox_stdout": (res.stdout or "")[:2000],
                 "parent_value": float(parent.value) if parent.value is not None else None,
                 "parent_is_seed": parent.id in sampler._seed_ids,
             }
@@ -436,11 +448,14 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
 
         # Children for the sampler
         for r_idx, (_, _, _) in enumerate(responses):
+            res = outs[r_idx]
             if valids[r_idx] and codes[r_idx]:
                 child = State.make(
                     timestep=step_idx,
                     value=rewards[r_idx],
                     code=codes[r_idx],
+                    raw_score=res.raw_score,
+                    construction=res.construction,
                 )
                 all_children.append((child, parent))
 
@@ -560,11 +575,12 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
                   f"max={is_ratio_max:.3f}")
     print(f"[step {step_idx}] train time: {train_time:.1f}s  "
           f"avg loss: {total_loss / n_examples:.4f}  "
-          f"avg logπ_θ - logπ_base: {total_logp_delta / n_examples:.4f}{is_msg}")
+          f"avg logpi_theta - logpi_base: {total_logp_delta / n_examples:.4f}{is_msg}")
 
     best = sampler.best_state()
     if best is not None:
-        print(f"[step {step_idx}] best so far: {best.value:.6f}  "
+        raw = f" raw={best.raw_score:.6f}" if best.raw_score is not None else ""
+        print(f"[step {step_idx}] best so far: value={best.value:.6f}{raw}  "
               f"(step total {time.time() - step_t0:.1f}s, archive={sampler.archive_size()})")
 
 
@@ -572,29 +588,42 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
 # Main
 # ======================================================================
 def main():
-    cfg = parse_args_into_cfg()
+    cfg, merged = load_config()
+
+    # Build the problem from the merged config (the registry reads problem-only
+    # knobs like num_circles / problem_type / budget_s / score_scale from here).
+    from problems.registry import get_problem
+    problem = get_problem(cfg.problem, merged)
 
     print("=" * 70)
-    print("TTT-Discover (Circle Packing) — local implementation")
+    print("TTT-Discover — local multi-problem implementation")
     print("=" * 70)
+    print(f"Problem:            {cfg.problem}"
+          + (f" ({cfg.problem_type})" if cfg.problem_type else ""))
+    print(f"Entrypoint:         {getattr(problem, 'entrypoint', '?')}")
+    print(f"Metric:             {getattr(problem, 'metric_name', '?')} "
+          f"({'maximize' if getattr(problem, 'maximize', True) else 'minimize'})")
     print(f"Model:              {cfg.model_name}")
     print(f"Backend:            {cfg.backend}")
-    print(f"Num circles:        {cfg.num_circles}")
     print(f"Target:             {cfg.target}")
     print(f"Steps:              {cfg.num_steps}")
     print(f"Groups per step:    {cfg.groups_per_step}")
     print(f"Group size:         {cfg.group_size}")
     print(f"Total rollouts/step: {cfg.groups_per_step * cfg.group_size}")
-    print(f"Seeds:              {cfg.num_seed_states}")
     print(f"LR:                 {cfg.learning_rate}")
     print(f"KL coef:            {cfg.kl_penalty_coef}")
     print(f"Max new tokens:     {cfg.max_new_tokens}")
+    print(f"Sandbox timeout:    {cfg.sandbox_timeout_s}s")
     print("=" * 70)
 
     # ---- experiment dir ----
     from experiment_io import make_experiment_dir, save_final_summary
     exp_dir = make_experiment_dir(cfg)
     print(f"[init] writing all rollouts to: {exp_dir}")
+
+    # ---- seed states (problem-defined) ----
+    seeds = problem.seed_states()
+    print(f"[init] problem produced {len(seeds)} seed state(s)")
 
     # ---- backend + model ----
     # Load backend FIRST so Unsloth can patch transformers if used.
@@ -621,11 +650,12 @@ def main():
     # ---- sampler ----
     from sampler import PUCTSampler
     sampler = PUCTSampler(
-        num_seeds=cfg.num_seed_states,
+        num_seeds=len(seeds) if seeds else cfg.num_seed_states,
         puct_c=cfg.puct_c,
         max_buffer_size=cfg.max_buffer_size,
         topk_children=cfg.topk_children_per_parent,
         seed_value=0.0,
+        seed_states=seeds,
     )
     print(f"[init] sampler archive size = {sampler.archive_size()}")
 
@@ -653,7 +683,7 @@ def main():
     try:
         for step in range(cfg.num_steps):
             train_step(backend, model, tokenizer, sampler, optimizer, step,
-                       cfg, exp_dir, gen_pool)
+                       cfg, exp_dir, problem, gen_pool)
     finally:
         if gen_pool is not None:
             print("[shutdown] stopping generation pool ...")
@@ -665,12 +695,14 @@ def main():
     print("=" * 70)
     best = sampler.best_state()
     if best is not None:
-        print(f"Best sum of radii: {best.value:.6f}")
+        raw = f"  (raw {getattr(problem, 'metric_name', 'metric')} = {best.raw_score:.6f})" \
+            if best.raw_score is not None else ""
+        print(f"Best reward (higher=better): {best.value:.6f}{raw}")
         print(f"Found at step:     {best.timestep}")
         print(f"\n--- best code ---\n{best.code}\n--- end ---")
         save_final_summary(exp_dir, best.value, best.code, best.timestep)
     else:
-        print("No valid packing was ever produced.")
+        print("No valid solution was ever produced.")
         save_final_summary(exp_dir, None, None, None)
     print(f"\nAll outputs saved under: {exp_dir}")
 

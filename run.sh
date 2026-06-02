@@ -13,11 +13,12 @@
 
 # python train.py --num-circles 10 --target 1.6294 \
 python train_multy.py --num-circles 26 \
-                --num-steps 3 \
+                --num-steps 10 \
                 --groups-per-step 8 \
-                --group-size 64 \
-                --max-new-tokens 6700 \
-                --temperature 1 
+                --group-size 64 
+                # \
+                # --max-new-tokens 6700 \
+                # --temperature 1 
                 # \
                 # --max-seq-length 40000 \
                 # --model-name openai/gpt-oss-120b

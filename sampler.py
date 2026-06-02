@@ -22,6 +22,12 @@ After each batch:
   - Push the new children into the archive
   - Keep top-K children per parent (K=2 by default)
   - Cap the archive at MAX_BUFFER_SIZE by reward (seeds always kept)
+
+State now also carries two problem-agnostic payloads, both optional:
+  - raw_score:   the TRUE metric (e.g. C5 bound, runtime us) for prompt display,
+                 separate from `value` which is always the higher-is-better reward.
+  - construction: an injected global (height_sequence_1 / initial_h_values) that
+                 is threaded parent -> child so a lineage can warm-start its search.
 """
 
 import uuid
@@ -33,13 +39,16 @@ from dataclasses import dataclass, field
 class State:
     id: str
     timestep: int          # training step when this state was first created
-    value: float           # reward of this state
+    value: float           # reward of this state (always higher=better)
     code: str              # the code that produced it
     parents: list = field(default_factory=list)   # [{"id": ..., "timestep": ...}]
     is_seed: bool = False  # True for initial seed states
+    raw_score: float = None      # true metric for prompt display (may equal value)
+    construction: list = None    # injected global threaded parent -> child
 
     @staticmethod
-    def make(timestep, value, code, parents=None, is_seed=False):
+    def make(timestep, value, code, parents=None, is_seed=False,
+             raw_score=None, construction=None):
         return State(
             id=str(uuid.uuid4()),
             timestep=timestep,
@@ -47,6 +56,8 @@ class State:
             code=code,
             parents=parents or [], # all the parents not just one
             is_seed=is_seed,
+            raw_score=raw_score,
+            construction=construction,
         )
 
 
@@ -58,6 +69,7 @@ class PUCTSampler:
         max_buffer_size: int = 1000,
         topk_children: int = 2,
         seed_value: float = 0.0,
+        seed_states: list = None,
     ):
         self.puct_c = float(puct_c)
         self.max_buffer_size = max_buffer_size
@@ -71,10 +83,26 @@ class PUCTSampler:
         # Archive starts with seeds
         self._states = []
         self._seed_ids = set()
-        for _ in range(num_seeds):
-            s = State.make(timestep=0, value=seed_value, code="", is_seed=True)
-            self._states.append(s)
-            self._seed_ids.add(s.id)
+
+        if seed_states:
+            # Rich seeds from the problem: each carries code/value/raw_score/construction.
+            for ss in seed_states:
+                s = State.make(
+                    timestep=0,
+                    value=getattr(ss, "value", seed_value),
+                    code=getattr(ss, "code", "") or "",
+                    is_seed=True,
+                    raw_score=getattr(ss, "raw_score", None),
+                    construction=getattr(ss, "construction", None),
+                )
+                self._states.append(s)
+                self._seed_ids.add(s.id)
+        else:
+            # Fallback: num_seeds blank seeds at a constant value (circle-packing style).
+            for _ in range(num_seeds):
+                s = State.make(timestep=0, value=seed_value, code="", is_seed=True)
+                self._states.append(s)
+                self._seed_ids.add(s.id)
 
         # Stats from last sample_states call (for printing)
         self.last_picks_info = []

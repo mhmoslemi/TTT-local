@@ -21,235 +21,98 @@ import numpy.random as npr
 # >>> PASTE YOUR run_packing() HERE <<<
 # ====================================================================
 
+
 import numpy as np
-import scipy.optimize as opt
+from scipy.optimize import minimize
 import math
-import random
 
 def run_packing():
     num_circles = 26
 
-    def improved_initial_layout(num_circles, max_radius_initial=0.1):
-        # Create centers using a hexagonal grid pattern
-        row_count = int(np.ceil(np.sqrt(num_circles)))
-        col_count = int(np.ceil(num_circles / row_count))
-        centers = np.zeros((num_circles, 2))
-        idx = 0
+    # Generate a hexagonal close packing (HCP) layout within the unit square
+    # Calculate the number of rows and columns needed
+    rows = int(math.ceil(math.sqrt(num_circles)))
+    cols = int(math.ceil(num_circles / rows))
+    
+    # Generate initial centers in a hexagonal close packing arrangement
+    centers = np.zeros((num_circles, 2))
+    for i in range(num_circles):
+        row = i // cols
+        col = i % cols
+        x = col * (1.0 / (cols - 1)) * 0.9  # Add padding
+        y = row * (1.0 / (rows - 1)) * 0.9  # Add padding
+        # Add offset for staggered rows (hexagonal packing)
+        if row % 2 == 1:
+            x += 0.5 * (1.0 / (cols - 1)) * 0.9
+        centers[i] = [x, y]
+    
+    # Trim to exactly 26 circles
+    centers = centers[:26]
+    radii = np.full(num_circles, 0.01)
 
-        for i in range(row_count):
-            for j in range(col_count):
-                if idx >= num_circles:
-                    break
-                # Hexagonal packing with dynamic spacing
-                x = j * (2 * max_radius_initial) + max_radius_initial
-                y = i * (2 * max_radius_initial) + max_radius_initial
-                centers[idx] = [x, y]
-                idx += 1
-
-        # Adjust for boundary constraints
-        for i in range(num_circles):
-            x, y = centers[i]
-            dist_to_boundary = min(x, 1 - x, y, 1 - y)
-            if dist_to_boundary < max_radius_initial:
-                # Push center towards the boundary
-                dir_x = np.random.uniform(-0.5, 0.5)
-                dir_y = np.random.uniform(-0.5, 0.5)
-                new_x = x + (dist_to_boundary - max_radius_initial) * dir_x
-                new_y = y + (dist_to_boundary - max_radius_initial) * dir_y
-                new_x = max(0, min(1, new_x))
-                new_y = max(0, min(1, new_y))
-                centers[i] = [new_x, new_y]
-
-        # Add circles near corners
-        for i in range(num_circles):
-            x, y = centers[i]
-            dist_to_corner = min(x, 1 - x, y, 1 - y)
-            if dist_to_corner < max_radius_initial:
-                # Place new circle near corner
-                dir_x = np.random.uniform(-0.5, 0.5)
-                dir_y = np.random.uniform(-0.5, 0.5)
-                new_x = max(0, min(1, x + (dist_to_corner - max_radius_initial) * dir_x))
-                new_y = max(0, min(1, y + (dist_to_corner - max_radius_initial) * dir_y))
-                centers[i] = [new_x, new_y]
-
-        initial_radii = np.full(num_circles, max_radius_initial)
-        for i in range(num_circles):
-            x, y = centers[i]
-            dist_to_boundary = min(x, 1 - x, y, 1 - y)
-            if dist_to_boundary < max_radius_initial:
-                initial_radii[i] = dist_to_boundary
-
-        return centers, initial_radii
-
-    def validate_packing(centers, radii):
-        n = centers.shape[0]
-
-        if np.isnan(centers).any() or np.isnan(radii).any():
-            return False, "NaN values present"
-
-        for i in range(n):
-            if radii[i] < 0:
-                return False, f"Circle {i} has negative radius {radii[i]}"
-
-        for i in range(n):
-            x, y = centers[i]
-            r = radii[i]
-            if (x - r < -1e-12 or x + r > 1 + 1e-12 or
-                y - r < -1e-12 or y + r > 1 + 1e-12):
-                return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                dx = centers[i][0] - centers[j][0]
-                dy = centers[i][1] - centers[j][1]
-                dist = np.sqrt(dx**2 + dy**2)
-                if dist < radii[i] + radii[j] - 1e-12:
-                    return False, f"Circles {i} and {j} overlap"
-
-        return True, "ok"
-
+    # Optimization step: maximize the sum of radii with constraints
     def objective(params):
-        flat_params = params.reshape(-1)
-        centers_opt = flat_params[:num_circles * 2].reshape((num_circles, 2))
-        radii_opt = flat_params[num_circles * 2:].reshape((num_circles,))
-        return -np.sum(radii_opt)  # Minimization of negative sum
+        # params is a flat array: [x1, y1, r1, x2, y2, r2, ..., x26, y26, r26]
+        params = params.reshape((num_circles, 3))
+        x = params[:, 0]
+        y = params[:, 1]
+        r = params[:, 2]
+        return -np.sum(r)  # Negative because we're minimizing
 
-    def genetic_algorithm():
-        population_size = 300
-        mutation_rate = 0.05
-        generations = 800
-        elite_fraction = 0.1
-        tolerance = 1e-6
+    def constraint_overlap(i, j, x, y, r):
+        dx = x[i] - x[j]
+        dy = y[i] - y[j]
+        dist = np.sqrt(dx*dx + dy*dy)
+        return dist - r[i] - r[j]
 
-        population = []
-        for _ in range(population_size):
-            centers, radii = improved_initial_layout(num_circles)
-            params = np.concatenate([centers.flatten(), radii])
-            population.append(params)
+    # Define boundary constraints
+    def constraint_boundary(i, x, y, r):
+        return x[i] - r[i]  # Ensure left boundary
+    def constraint_boundary_right(i, x, y, r):
+        return 1.0 - x[i] - r[i]  # Ensure right boundary
+    def constraint_boundary_top(i, x, y, r):
+        return 1.0 - y[i] - r[i]  # Ensure top boundary
+    def constraint_boundary_bottom(i, x, y, r):
+        return y[i] - r[i]  # Ensure bottom boundary
 
-        for generation in range(generations):
-            fitness = []
-            for params in population:
-                centers_opt = params[:num_circles * 2].reshape((num_circles, 2))
-                radii_opt = params[num_circles * 2:].reshape((num_circles,))
-                is_valid, message = validate_packing(centers_opt, radii_opt)
-                if not is_valid:
-                    fitness.append(-np.inf)
-                else:
-                    fitness.append(np.sum(radii_opt))
+    # Prepare initial parameters: [x1, y1, r1, x2, y2, r2, ..., x26, y26, r26]
+    initial_params = np.zeros(num_circles * 3)
+    initial_params[::3] = centers[:, 0]  # x coordinates
+    initial_params[1::3] = centers[:, 1]  # y coordinates
+    initial_params[2::3] = radii  # radii
 
-            # Select elite individuals
-            indices = np.argsort(fitness)[-int(population_size * elite_fraction):]
-            parents = [population[i] for i in indices]
+    # Define bounds for optimization: x, y ∈ [0, 1], r ≥ 0
+    bounds = []
+    for i in range(num_circles):
+        bounds.extend([(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)])  # x, y, r for each circle
 
-            # Generate offspring
-            offspring = []
-            for _ in range(population_size - len(parents)):
-                parent1 = random.choice(parents)
-                parent2 = random.choice(parents)
-                child = np.copy(parent1)
-                for i in range(len(child)):
-                    if random.random() < mutation_rate:
-                        child[i] += np.random.uniform(-0.01, 0.01)
-                offspring.append(child)
+    # Define constraints
+    constraints = []
+    for i in range(num_circles):
+        constraints.append({'type': 'ineq', 'fun': lambda p, i=i: constraint_boundary(i, p[::3], p[1::3], p[2::3])})
+        constraints.append({'type': 'ineq', 'fun': lambda p, i=i: constraint_boundary_right(i, p[::3], p[1::3], p[2::3])})
+        constraints.append({'type': 'ineq', 'fun': lambda p, i=i: constraint_boundary_top(i, p[::3], p[1::3], p[2::3])})
+        constraints.append({'type': 'ineq', 'fun': lambda p, i=i: constraint_boundary_bottom(i, p[::3], p[1::3], p[2::3])})
 
-            population = parents + offspring
+    for i in range(num_circles):
+        for j in range(i + 1, num_circles):
+            constraints.append({'type': 'ineq', 'fun': lambda p, i=i, j=j: constraint_overlap(i, j, p[::3], p[1::3], p[2::3])})
 
-            # Early stopping
-            best_fitness = max(fitness)
-            if best_fitness > 2.63:
-                break
+    # Optimization
+    result = minimize(objective, initial_params, method='SLSQP', bounds=bounds, constraints=constraints, tol=1e-10)
+    optimized_params = result.x
+    optimized_params = optimized_params.reshape((num_circles, 3))
+    centers = optimized_params[:, :2]
+    radii = optimized_params[:, 2]
 
-        best_params = None
-        best_fitness = -np.inf
-        for params in population:
-            centers_opt = params[:num_circles * 2].reshape((num_circles, 2))
-            radii_opt = params[num_circles * 2:].reshape((num_circles,))
-            is_valid, message = validate_packing(centers_opt, radii_opt)
-            if not is_valid:
-                continue
-            current_fitness = np.sum(radii_opt)
-            if current_fitness > best_fitness:
-                best_fitness = current_fitness
-                best_params = params
-        return best_params if best_params is not None else improved_initial_layout(num_circles)[1]
+    # Final validation
+    valid, message = validate_packing(centers, radii)
+    if not valid:
+        print(f"Validation error: {message}")
+        return np.zeros((num_circles, 2)), np.zeros(num_circles), 0.0
 
-    def refine_optimization(centers, radii):
-        bounds = []
-        for i in range(num_circles):
-            x, y = centers[i]
-            r = radii[i]
-            x_low = max(0, x - r)
-            x_high = min(1, x + r)
-            y_low = max(0, y - r)
-            y_high = min(1, y + r)
-            r_low = max(0, r - 0.01)
-            r_high = min(1, r + 0.01)
-            bounds.extend([(x_low, x_high), (y_low, y_high), (r_low, r_high)])
-
-        def constraints(x):
-            flat_x = x.reshape(-1)
-            centers_opt = flat_x[:num_circles * 2].reshape((num_circles, 2))
-            radii_opt = flat_x[num_circles * 2:].reshape((num_circles,))
-            
-            for i in range(num_circles):
-                x, y = centers_opt[i]
-                r = radii_opt[i]
-                if (x - r < -1e-12 or x + r > 1 + 1e-12 or
-                    y - r < -1e-12 or y + r > 1 + 1e-12):
-                    return -1.0
-
-            for i in range(num_circles):
-                for j in range(i + 1, num_circles):
-                    dx = centers_opt[i][0] - centers_opt[j][0]
-                    dy = centers_opt[i][1] - centers_opt[j][1]
-                    dist = np.sqrt(dx**2 + dy**2)
-                    if dist < radii_opt[i] + radii_opt[j] - 1e-12:
-                        return -1.0
-
-            return 0.0
-
-        initial_guess = np.concatenate([centers.flatten(), radii])
-        result = opt.minimize(
-            objective,
-            initial_guess,
-            method='SLSQP',
-            bounds=bounds,
-            constraints={'type': 'ineq', 'fun': constraints},
-            tol=1e-8
-        )
-
-        if result.success:
-            return result.x[:num_circles * 2].reshape((num_circles, 2)), result.x[num_circles * 2:].reshape((num_circles,))
-        else:
-            return centers, radii
-
-    centers, radii = improved_initial_layout(num_circles)
-
-    best_params = genetic_algorithm()
-    centers_opt = best_params[:num_circles * 2].reshape((num_circles, 2))
-    radii_opt = best_params[num_circles * 2:].reshape((num_circles,))
-
-    is_valid, message = validate_packing(centers_opt, radii_opt)
-    if not is_valid:
-        print(f"Validation failed: {message}")
-        centers_opt = centers
-        radii_opt = radii
-        is_valid, message = validate_packing(centers_opt, radii_opt)
-        if not is_valid:
-            print(f"Initial layout also failed: {message}")
-            return np.zeros((26, 2)), np.zeros(26), 0.0
-
-    centers_opt, radii_opt = refine_optimization(centers_opt, radii_opt)
-
-    is_valid, message = validate_packing(centers_opt, radii_opt)
-    if not is_valid:
-        print(f"Refined layout failed: {message}")
-        return np.zeros((26, 2)), np.zeros(26), 0.0
-
-    sum_radii = np.sum(radii_opt)
-    return centers_opt, radii_opt, sum_radii
-
+    # Return result
+    return centers, radii, np.sum(radii)
 
 
     

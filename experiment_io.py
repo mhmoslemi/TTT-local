@@ -9,8 +9,9 @@ Filenames:
     step03_group2_rollout17.txt        ← raw model response
     step03_group2_rollout17.meta.json  ← reward, valid, msg, beta, advantage, etc.
 
-Directory name:
-    runs/n5_target1.1036_steps50_g8x64_lr4e-05_T1.0_model-Qwen_Qwen3-8B_20260527-220145/
+Directory name (problem-agnostic):
+    runs/erdos_steps50_g8x64_lr4e-05_T1.0_klc0.1_model-openai_gpt-oss-120b_20260602-220145/
+    runs/circle_packing_n26_target2.6360_steps50_g8x64_..._20260527-220145/
 
 A config.json is also dumped at the root of the run dir.
 """
@@ -24,18 +25,39 @@ from pathlib import Path
 
 def _slugify(s: str) -> str:
     """Make a string safe for use in a directory name."""
-    return re.sub(r"[^A-Za-z0-9._\-]", "_", s).strip("_")
+    return re.sub(r"[^A-Za-z0-9._\-]", "_", str(s)).strip("_")
 
 
 def make_experiment_dir(cfg, root: str = "runs") -> Path:
     """
     Build a directory whose name encodes the main hyperparams of this run.
     Creates it and returns the Path.
+
+    Works for every problem: it leads with the problem name and only appends
+    circle-packing's num_circles/target when those attributes are present.
     """
     model_slug = _slugify(cfg.model_name)
-    name_parts = [
-        f"n{cfg.num_circles}",
-        f"target{cfg.target:.4f}",
+    problem = _slugify(getattr(cfg, "problem", "run"))
+
+    name_parts = [problem]
+
+    # Circle-packing-specific tags, included only when present (back-compat).
+    num_circles = getattr(cfg, "num_circles", None)
+    target = getattr(cfg, "target", None)
+    if problem in ("circle_packing", "circle", "circles") and num_circles is not None:
+        name_parts.append(f"n{num_circles}")
+    if target is not None:
+        try:
+            name_parts.append(f"target{float(target):.4f}")
+        except (TypeError, ValueError):
+            pass
+
+    # A problem_type tag for the multi-mode problems (ac1/ac2, trimul/mla...).
+    ptype = getattr(cfg, "problem_type", None)
+    if ptype:
+        name_parts.append(_slugify(ptype))
+
+    name_parts += [
         f"steps{cfg.num_steps}",
         f"g{cfg.groups_per_step}x{cfg.group_size}",
         f"lr{cfg.learning_rate:.0e}",
@@ -120,12 +142,11 @@ if __name__ == "__main__":
     # Self-test
     from types import SimpleNamespace
     cfg = SimpleNamespace(
-        model_name="Qwen/Qwen3-8B",
-        num_circles=5, target=1.103553,
+        model_name="openai/gpt-oss-120b",
+        problem="erdos", problem_type=None,
         num_steps=50, groups_per_step=8, group_size=64,
         learning_rate=4e-5, temperature=1.0, kl_penalty_coef=0.1,
     )
-    # asdict won't work on SimpleNamespace; the function handles that
     p = make_experiment_dir(cfg, root="/tmp/runs_test")
     print(f"Created: {p}")
     save_rollout(p, step=0, group=0, rollout=0,
