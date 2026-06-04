@@ -1,4 +1,4 @@
-# TTT-Discover (Circle Packing) — Local Implementation
+# TTT-Discover — Local 
 
 
 
