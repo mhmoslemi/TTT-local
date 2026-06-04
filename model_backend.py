@@ -1,21 +1,4 @@
-"""
-Two interchangeable model backends:
 
-  - "unsloth": uses Unsloth's FastLanguageModel. Faster training, faster
-    inference, lower memory. 
-    
-  - "hf": plain transformers + PEFT. Slower but supports anything that
-    has a HuggingFace AutoModelForCausalLM implementation.
-
-Both expose the same surface to train.py:
-
-    backend = load_backend(name, cfg)
-    model, tokenizer = backend.load()
-    backend.set_inference_mode()      # before generate
-    backend.set_training_mode()       # before forward/backward
-    with backend.disable_adapter():   # base policy (no LoRA) for KL
-        ...
-"""
 
 import contextlib
 import torch
@@ -83,7 +66,6 @@ class UnslothBackend:
         self._FastLanguageModel.for_training(self.model)
 
     def disable_adapter(self):
-        # PEFT API also exposed by Unsloth's LoRA wrapper
         return self.model.disable_adapter()
 
 
@@ -127,7 +109,6 @@ class HFBackend:
         if self.cfg.load_in_4bit:
             model = prepare_model_for_kbit_training(model)
 
-        # Enable gradient checkpointing (saves memory, slows training a bit)
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -183,8 +164,7 @@ def load_backend(name: str, cfg):
     if name == "auto":
         try:
             b = UnslothBackend(cfg)
-            # We don't actually load here — just sanity-check import works
-            import unsloth  # noqa: F401
+            import unsloth 
             print("[backend=auto] Unsloth available, will try unsloth first")
             return _AutoFallbackBackend(cfg)
         except Exception as e:

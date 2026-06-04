@@ -72,8 +72,12 @@ Rules:
 - No filesystem or network IO.
 - You need to get really creative and think from first principles.
 
-Make sure to /think step by step, first give your strategy between <strategy> and </strategy> tags, then finally return the final program between ```python and ```.
+Make sure to think step by step, first give your strategy between <strategy> and </strategy> tags, then finally return the final program between ```python and ```. /no_think
+
 """
+
+# Make sure to /think step by step, first give your strategy between <strategy> and </strategy> tags, then finally return the final program between ```python and ```.
+
 
     return [
         {"role": "system", "content": SYSTEM},

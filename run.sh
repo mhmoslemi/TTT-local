@@ -13,7 +13,7 @@
 
 # python train.py --num-circles 10 --target 1.6294 \
 python train_multy.py --num-circles 26 \
-                --num-steps 10 \
+                --num-steps 60 \
                 --groups-per-step 8 \
                 --group-size 64 
                 # \

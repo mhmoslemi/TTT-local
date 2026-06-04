@@ -70,12 +70,10 @@ def make_experiment_dir(cfg, root: str = "runs") -> Path:
     path = Path(root) / name
     path.mkdir(parents=True, exist_ok=True)
 
-    # Dump the full config so the run is self-documenting.
-    # asdict() handles dataclasses; tuples become lists.
     try:
         cfg_dict = asdict(cfg)
     except TypeError:
-        # Not a dataclass for some reason
+
         cfg_dict = {k: getattr(cfg, k) for k in dir(cfg)
                     if not k.startswith("_") and not callable(getattr(cfg, k))}
     (path / "config.json").write_text(json.dumps(cfg_dict, indent=2, default=str))
@@ -103,12 +101,12 @@ def save_rollout(
     def _coerce(v):
         if isinstance(v, (str, int, float, bool)) or v is None:
             return v
-        if hasattr(v, "item"):  # numpy scalar
+        if hasattr(v, "item"):  
             try:
                 return v.item()
             except Exception:
                 return str(v)
-        if hasattr(v, "tolist"):  # numpy array
+        if hasattr(v, "tolist"):  
             try:
                 return v.tolist()
             except Exception:

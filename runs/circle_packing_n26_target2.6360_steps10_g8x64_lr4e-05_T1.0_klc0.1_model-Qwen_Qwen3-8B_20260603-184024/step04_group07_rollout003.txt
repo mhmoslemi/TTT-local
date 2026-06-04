@@ -1,0 +1,258 @@
+<strategy>
+To improve the circle packing in the unit square, we need a more sophisticated and adaptive approach. The previous program attempts a local optimization around initial configurations but doesn't account for the global structure of the packing. Here's a structured strategy for improvement:
+
+### Key Improvements:
+1. **Hybrid Initial Configurations**: Instead of using only a few types of initial positions, we will generate a variety of configurations, including hexagonal, staggered, nested, and random placements, each with different spacing and alignment. This will give the optimizer a broader search space.
+
+2. **Variable Radius Optimization with Adaptive Constraints**: We'll allow different radii for each circle while ensuring:
+   - Each circle remains fully inside the unit square.
+   - The distance between the centers of any two circles is at least the sum of their radii.
+   - The problem is framed as an optimization with constraints using a more robust solver (e.g., `SLSQP` or `COBYLA`).
+
+3. **Global Optimization with Differential Evolution**: We'll use a global optimization method like `differential_evolution` to sample the space more effectively and avoid local minima. This is especially important in high-dimensional and non-convex problems like circle packing.
+
+4. **Adaptive Radius Initialization**: Instead of using a fixed initial radius, we'll compute a radius based on the area of the square and then refine it through the optimization process. This ensures that the initial guess is reasonable and helps the solver converge faster.
+
+5. **Parameter Tuning**: We'll experiment with different tolerance levels, constraint formulations (e.g., `LinearConstraint`), and optimization strategies (e.g., combination of `differential_evolution` for global search and `SLSQP` for local refinement).
+
+6. **Boundary and Corner Treatment**: We'll specifically aim to place larger circles near the corners and edges of the square where they can grow without overlapping, leveraging the available space more efficiently.
+
+7. **Gap-Filling Strategy**: After computing an initial packing, we'll perform a second pass where we attempt to reposition and resize circles to fill gaps, using a greedy algorithm that iteratively moves circles closer to underutilized space.
+
+### Implementation Strategy:
+- We define a variety of initial configurations and optimize them independently.
+- We use a `differential_evolution` approach to explore the solution space across all circles' positions and radii.
+- We validate each candidate solution with the provided `validate_packing` function.
+- We maintain the best configuration based on the sum of radii.
+- We use a combination of global and local optimization techniques to refine the configuration and ensure it meets all constraints.
+
+This approach balances exploration and exploitation, aiming to find a near-optimal packing arrangement with maximum total radius.
+</strategy>
+
+```python
+import numpy as np
+from scipy.optimize import differential_evolution, Bounds
+from scipy.spatial.distance import cdist
+from itertools import combinations
+from scipy.optimize import LinearConstraint
+
+def run_packing():
+    # Define the unit square
+    square_bounds = np.array([[0.0, 1.0], [0.0, 1.0]])
+
+    # Define multiple initial configurations
+    def generate_initial_positions():
+        # Hexagonal packing
+        def hexagonal(n):
+            rows = int(np.ceil(np.sqrt(n)))
+            cols = int(np.ceil(n / rows))
+            spacing = 1.0 / (cols + 1)
+            positions = []
+            for i in range(rows):
+                for j in range(cols):
+                    if i % 2 == 0:
+                        x = j * spacing + spacing / 2
+                    else:
+                        x = j * spacing + spacing / 2 + spacing / 2
+                    y = i * spacing + spacing / 2
+                    positions.append([x, y])
+                    if len(positions) >= n:
+                        break
+                if len(positions) >= n:
+                    break
+            return np.array(positions[:n])
+
+        # Random placement
+        def random(n):
+            return np.random.rand(n, 2)
+
+        # Corner-pinned placement
+        def corner_pinned(n):
+            positions = []
+            cols = int(np.ceil(np.sqrt(n)))
+            rows = int(np.ceil(n / cols))
+            for i in range(rows):
+                for j in range(cols):
+                    if i % 2 == 0:
+                        x = j * (1.0 / cols) + (1.0 / cols) / 2
+                    else:
+                        x = j * (1.0 / cols) + (1.0 / cols) / 2 + (1.0 / cols) / 2
+                    y = i * (1.0 / rows) + (1.0 / rows) / 2
+                    positions.append([x, y])
+                    if len(positions) >= n:
+                        break
+                if len(positions) >= n:
+                    break
+            return np.array(positions[:n])
+
+        # Staggered grid with variable spacing
+        def staggered_grid(n):
+            rows = int(np.ceil(np.sqrt(n)))
+            cols = int(np.ceil(n / rows))
+            spacing = 1.0 / (cols + 1)
+            positions = []
+            for i in range(rows):
+                for j in range(cols):
+                    if i % 2 == 0:
+                        x = j * spacing + spacing / 2
+                    else:
+                        x = j * spacing + spacing / 2 + spacing / 2
+                    y = i * spacing + spacing / 2 + (spacing * i) / 2
+                    positions.append([x, y])
+                    if len(positions) >= n:
+                        break
+                if len(positions) >= n:
+                    break
+            return np.array(positions[:n])
+
+        # Nested grid
+        def nested_grid(n):
+            positions = []
+            for i in range(n):
+                x = np.cos(2 * np.pi * i / n) / 2 + 0.5
+                y = np.sin(2 * np.pi * i / n) / 2 + 0.5
+                positions.append([x, y])
+            return np.array(positions)
+
+        # Generate a variety of initial configurations
+        initial_positions_list = [hexagonal(26), random(26), corner_pinned(26), staggered_grid(26), nested_grid(26)]
+        return initial_positions_list
+
+    # Objective function to maximize the sum of radii
+    def objective(radii):
+        return -np.sum(radii)  # Minimize the negative sum to maximize sum
+
+    # Constraint function to ensure circles are within the unit square
+    def boundary_constraints(centers, radii):
+        constraints = []
+        for i in range(len(radii)):
+            x, y = centers[i]
+            r = radii[i]
+            # Ensure circle is within the unit square
+            constraints.append({'type': 'ineq', 'fun': lambda r: x - r})
+            constraints.append({'type': 'ineq', 'fun': lambda r: 1.0 - x - r})
+            constraints.append({'type': 'ineq', 'fun': lambda r: y - r})
+            constraints.append({'type': 'ineq', 'fun': lambda r: 1.0 - y - r})
+        return constraints
+
+    # Constraint function to ensure no circles overlap
+    def non_overlap_constraints(centers, radii):
+        constraints = []
+        for i, j in combinations(range(len(radii)), 2):
+            def constraint_func(radii):
+                return np.sqrt(np.sum((centers[i] - centers[j])**2)) - (radii[i] + radii[j])
+            constraints.append({'type': 'ineq', 'fun': constraint_func})
+        return constraints
+
+    # Validate the packing
+    def validate_packing(centers, radii):
+        n = centers.shape[0]
+
+        if np.isnan(centers).any() or np.isnan(radii).any():
+            return False, "NaN values present"
+
+        for i in range(n):
+            if radii[i] < 0:
+                return False, f"Circle {i} has negative radius {radii[i]}"
+
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            if (x - r < -1e-12 or x + r > 1 + 1e-12
+                    or y - r < -1e-12 or y + r > 1 + 1e-12):
+                return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return False, f"Circles {i} and {j} overlap"
+
+        return True, "ok"
+
+    # Generate multiple initial positions
+    initial_positions_list = generate_initial_positions()
+
+    best_centers = None
+    best_radii = None
+    best_sum_radii = 0
+
+    # Global optimization using differential evolution
+    for centers in initial_positions_list:
+        # Initial radius guess: all circles have the same radius, based on area
+        # Estimate initial radius using area heuristic
+        area = 1.0  # Unit square
+        estimated_radius = np.sqrt(area / 26)
+        radii_initial = np.full(26, estimated_radius)
+
+        # Convert centers and radii into a single array for optimization
+        initial_guess = np.concatenate((centers.flatten(), radii_initial))
+
+        # Define bounds for each variable (positions and radii)
+        bounds = []
+        for i in range(26):
+            bounds.extend([(0.0, 1.0), (0.0, 1.0)])  # position x and y for each circle
+            bounds.extend([(0.0, 1.0)])  # radius for each circle
+
+        # Define the optimization problem
+        def objective_function(x):
+            # Unpack the variables
+            centers_opt = x[:26*2].reshape(26, 2)
+            radii_opt = x[26*2:].reshape(26)
+            return -np.sum(radii_opt)
+
+        # Define the constraints
+        def constraints_function(x):
+            centers_opt = x[:26*2].reshape(26, 2)
+            radii_opt = x[26*2:].reshape(26)
+            constraints = []
+            for i in range(26):
+                x_i, y_i = centers_opt[i]
+                r_i = radii_opt[i]
+                constraints.append({'type': 'ineq', 'fun': lambda x: x_i - r_i})
+                constraints.append({'type': 'ineq', 'fun': lambda x: 1.0 - x_i - r_i})
+                constraints.append({'type': 'ineq', 'fun': lambda x: y_i - r_i})
+                constraints.append({'type': 'ineq', 'fun': lambda x: 1.0 - y_i - r_i})
+            for i, j in combinations(range(26), 2):
+                x_i, y_i = centers_opt[i]
+                x_j, y_j = centers_opt[j]
+                r_i = radii_opt[i]
+                r_j = radii_opt[j]
+                def constraint_func(x):
+                    dist = np.sqrt((x_i - x_j)**2 + (y_i - y_j)**2)
+                    return dist - (r_i + r_j)
+                constraints.append({'type': 'ineq', 'fun': constraint_func})
+            return constraints
+
+        # Run optimization
+        try:
+            result = differential_evolution(
+                objective_function,
+                bounds,
+                constraints=constraints_function,
+                tol=1e-8,
+                maxiter=100,
+                popsize=20
+            )
+        except Exception:
+            continue
+
+        # Extract the optimized solution
+        optimized_vars = result.x
+        centers_opt = optimized_vars[:26*2].reshape(26, 2)
+        radii_opt = optimized_vars[26*2:].reshape(26)
+
+        # Validate the solution
+        valid, message = validate_packing(centers_opt, radii_opt)
+        if not valid:
+            continue
+
+        # Update best solution
+        sum_radii = np.sum(radii_opt)
+        if sum_radii > best_sum_radii:
+            best_centers = centers_opt
+            best_radii = radii_opt
+            best_sum_radii = sum_radii
+
+    return best_centers, best_radii, best_sum_radii
+```

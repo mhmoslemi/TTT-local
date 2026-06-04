@@ -1,0 +1,163 @@
+<strategy>
+To improve the circle packing in a unit square, we need to rethink the initial placement and the optimization strategy. Here's a step-by-step plan:
+
+### 1. **Initial Placement Optimization**
+Instead of uniform grid-based placement, I'll use a more optimized and flexible initial configuration. A common strategy for circle packing is to start with a hexagonal close packing arrangement, which is more space-efficient. However, given the constraint of a unit square, we'll need to manually adjust positions to fit the hexagonal pattern.
+
+### 2. **Variable Radii Optimization**
+Previously, all circles had the same initial radius. This is suboptimal. Instead, we can give each circle an individual initial radius, based on their proximity to neighbors and boundaries. This will allow more flexibility in the optimization phase.
+
+### 3. **Optimization Parameters and Method**
+- Use the **SLSQP** method for constrained optimization since it handles inequality constraints well.
+- Add bounds to ensure all radii are non-negative and that no circle exceeds the square.
+- Consider **non-uniform bounds** for some circles if they are near the boundary (e.g., smaller initial radii for circles near edges).
+
+### 4. **Boundary and Corner Placement**
+Circles placed near the corners or edges can sometimes be larger than those in the center if their neighbors are carefully positioned. I'll ensure that the initial configuration includes circles near corners and edges with more freedom to expand.
+
+### 5. **Iterative Refinement**
+To improve results further, we may use an **iterative refinement strategy**:
+- Run the optimization once.
+- Identify circles that are too small or too large based on the final configuration.
+- Reposition or resize them slightly and re-optimize.
+
+### 6. **Hybrid Approach**
+Combine a **grid-based initial placement** with **random perturbations** near the edges. This can help avoid local minima.
+
+### 7. **Constraint Tightening**
+Refine the constraints further:
+- Instead of using hard boundaries (e.g., `x - r >= 0`), use soft constraints (e.g., `x - r >= -1e-6`) to allow some tolerance.
+- Adjust constraint tolerances to avoid over-constrained systems during optimization.
+
+### 8. **Use of Symmetry**
+Due to the square's symmetry, we can use it to our advantage. If a configuration works in one corner, it may be mirrored to others, reducing the search space.
+
+Now, let's implement the new strategy.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+from typing import Tuple
+
+def run_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    # Initial grid-based placement with some random perturbations
+    n = 26
+    centers = np.zeros((n, 2))
+    radii = np.zeros(n)
+    
+    # 25 circles in a hexagonal pattern with some randomness
+    # Start with a base hexagonal grid
+    base_radius = 0.18
+    dx = 2 * base_radius * np.sqrt(3)  # Horizontal spacing between hexagons
+    dy = 2 * base_radius           # Vertical spacing between rows
+    
+    # Create a grid of hexagonal centers
+    for i in range(5):
+        for j in range(5):
+            idx = i * 5 + j
+            x = j * dx
+            y = i * dy
+            if i % 2 == 1:  # Offset for staggered rows
+                x += dx / 2
+            centers[idx] = [x, y]
+    
+    # Add one extra circle at the center
+    centers[25] = [0.5, 0.5]
+    
+    # Compute initial radius based on the base spacing
+    initial_radius = base_radius
+    radii[:] = initial_radius
+
+    # Perturb centers slightly for better optimization
+    np.random.seed(42)
+    perturbation = 0.05
+    centers += np.random.uniform(-perturbation, perturbation, centers.shape)
+
+    # Optimization: maximize sum of radii with constraints
+    def objective(radii_vec):
+        return -np.sum(radii_vec)  # minimize negative sum to maximize sum
+
+    def constraints(radii_vec):
+        # Equality constraints: ensure that no constraint is violated
+        # Return a tuple (c, G, h) for inequality constraints
+        # For now, we use a simple gradient-based constrained optimization
+
+        # Re-arrange centers and radii
+        centers_reshaped = centers.reshape(n, 2)
+        radii_reshaped = radii_vec
+
+        # Non-overlapping constraints: dist(c_i, c_j) >= r_i + r_j
+        constraints = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.sqrt(np.sum((centers_reshaped[i] - centers_reshaped[j]) ** 2))
+                constraint = dist - radii_reshaped[i] - radii_reshaped[j]
+                constraints.append(constraint)
+
+        # Boundary constraints: x - r >= 0, x + r <= 1, same for y
+        for i in range(n):
+            x, y = centers_reshaped[i]
+            r = radii_reshaped[i]
+            constraints.append(x - r - 1e-6)  # Soft constraint to allow minor violation
+            constraints.append(1 - x - r - 1e-6)
+            constraints.append(y - r - 1e-6)
+            constraints.append(1 - y - r - 1e-6)
+
+        return np.array(constraints)
+
+    # Initial guess
+    initial_guess = np.full(n, initial_radius)
+
+    # Optimization with bounds
+    # Bounds: each radius must be >= 0
+    bounds = [(0, 1) for _ in range(n)]
+
+    # Use SLSQP to handle the constrained optimization
+    result = opt.minimize(
+        fun=objective,
+        x0=initial_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints={'type': 'ineq', 'fun': constraints},
+        tol=1e-6
+    )
+
+    # Extract final centers, radii, and sum
+    best_radii = result.x
+    best_centers = centers  # centers are not optimized in this approach
+    sum_radii = np.sum(best_radii)
+
+    # Validate the packing
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        raise ValueError(msg)
+
+    return best_centers, best_radii, sum_radii
+
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```

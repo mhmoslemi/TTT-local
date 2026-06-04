@@ -53,7 +53,7 @@ class Config:
     num_steps: int = 50
     groups_per_step: int = 8
     group_size: int = 64
-    num_seed_states: int = 8           
+    num_seed_states: int = 16           
     learning_rate: float = 4e-5
     kl_penalty_coef: float = 0.1
     max_new_tokens: int = 4200
@@ -75,8 +75,11 @@ class Config:
     print_responses: int = 0           # how many rollouts to print per step 
 
     # Multi-GPU generation
-    num_gpus: int = 8
-    gpu_ids: str = "0,1,2,3,4,5,6,7"
+    num_gpus: int = 4
+    # num_gpus: int = 1
+    # gpu_ids: str = "0,1,2,3,4,5,6,7"
+    gpu_ids: str = "1,2,4,6"
+    # gpu_ids: str = "1"
 
 
 # ======================================================================
@@ -319,17 +322,27 @@ def _save_adapter(model, exp_dir, step_idx):
     return out_dir
 
 
-# ======================================================================
-# One training step
-# ======================================================================
+# =====================================================================
+# REPLACE your existing train_step(...) in the train file with this one.
+# Signature is unchanged, so the call site in main() does not change.
+# Only the rollout + scoring section changed: generation is streamed and
+# each rollout's program is evaluated on a CPU thread pool WHILE the GPUs
+# keep generating. The TRAIN STEP block at the bottom is identical to yours.
+#
+# Optional tuning: add `reward_workers: int = 0` to Config (0 = auto). Auto
+# leaves ~one CPU core per GPU worker for the generation loop.
+# =====================================================================
 def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
                cfg: Config, exp_dir, problem, gen_pool=None):
+    import os
     import torch
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from advantage import entropic_adaptive_advantages
     from sampler import State
     from experiment_io import save_rollout
     from problems.base import ParentContext
+    from gen_workers import make_progress_bar
 
     step_t0 = time.time()
     parents = sampler.sample_states(cfg.groups_per_step)
@@ -368,51 +381,89 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
             )
         prompts_by_group.append(prompt_text)
 
-    # ----- ROLLOUTS -----
-    rollout_t0 = time.time()
+    num_groups = len(parents)
+    total_rollouts = num_groups * cfg.group_size
 
-    if gen_pool is not None:
-        # Multi-GPU path: save current LoRA adapter, then generate all groups
-        # in parallel across all workers. We save every step (including step 0,
-        # so workers use the same LoRA-wrapped policy the main process has).
-        #
-        # Workers now also return per-token behavior logprobs (the sampling
-        # distribution), so the training step can apply an importance-sampling
-        # correction for the HF-generation vs Unsloth-scoring backend mismatch.
-        adapter_path = _save_adapter(model, exp_dir, step_idx)
+    # ----- REWARD POOL (CPU), runs concurrently with generation -----
+    # compute_reward delegates the heavy work to a subprocess sandbox, so the
+    # launching thread mostly waits (GIL released) and many sandboxes run in
+    # parallel across cores. THREAD-SAFETY REQUIREMENT: each compute_reward call
+    # must use a unique temp file/dir and must not os.chdir or mutate shared
+    # state; otherwise concurrent runs corrupt each other's rewards.
+    n_reward_workers = getattr(cfg, "reward_workers", 0)
+    if not n_reward_workers:
+        n_reward_workers = max(1, (os.cpu_count() or 8) - max(0, cfg.num_gpus))
+    reward_pool = ThreadPoolExecutor(max_workers=n_reward_workers)
 
-        group_responses = gen_pool.generate_groups(
-            prompts_by_group=prompts_by_group,
-            group_size=cfg.group_size,
-            adapter_path=adapter_path,
-            max_new_tokens=cfg.max_new_tokens,
-            temperature=cfg.temperature,
-            top_p=cfg.top_p,
+    group_responses = {g: [] for g in range(num_groups)}   # (text, token_ids), arrival order
+    reward_futures = {g: [] for g in range(num_groups)}    # aligned RewardResult futures
+
+    def _submit_rollout(g, text, token_ids):
+        group_responses[g].append((text, token_ids))
+        fut = reward_pool.submit(
+            problem.compute_reward, text, parent_ctxs[g], cfg.sandbox_timeout_s
         )
-    else:
-        # Single-GPU fallback path: sequential generation in this process.
-        # On-policy (same model, same backend, no lag), so the IS ratio is
-        # exactly 1. Tag behavior logprobs None to mean "no correction".
-        backend.set_inference_mode()
-        group_responses = {}
-        for g, prompt_text in enumerate(prompts_by_group):
-            responses, _ = generate_responses(
-                model, tokenizer, prompt_text, cfg.group_size, cfg
-            )
-            group_responses[g] = [(t, ids, None) for (t, ids) in responses]
+        reward_futures[g].append(fut)
+
+    # ----- ROLLOUTS (streamed) + dispatch rewards as each rollout lands -----
+    rollout_t0 = time.time()
+    try:
+        if gen_pool is not None:
+            # Multi-GPU: save adapter, then consume the generation stream. Each
+            # (worker, group) job that lands is queued for reward eval right
+            # away, so by the time generation finishes most rewards are done.
+            adapter_path = _save_adapter(model, exp_dir, step_idx)
+            for group_idx, job_results in gen_pool.iter_group_jobs(
+                    prompts_by_group=prompts_by_group,
+                    group_size=cfg.group_size,
+                    adapter_path=adapter_path,
+                    max_new_tokens=cfg.max_new_tokens,
+                    temperature=cfg.temperature,
+                    top_p=cfg.top_p,
+            ):
+                for (text, token_ids) in job_results:
+                    _submit_rollout(group_idx, text, token_ids)
+        else:
+            # Single-GPU: generate group by group; submit each group's rewards
+            # right after it's generated so eval overlaps the next group's gen.
+            backend.set_inference_mode()
+            gen_bar = make_progress_bar(total_rollouts, desc="rollouts")
+            try:
+                for g, prompt_text in enumerate(prompts_by_group):
+                    responses, _ = generate_responses(
+                        model, tokenizer, prompt_text, cfg.group_size, cfg
+                    )
+                    for (text, token_ids) in responses:
+                        _submit_rollout(g, text, token_ids)
+                    gen_bar.update(len(responses))
+            finally:
+                gen_bar.close()
+
+        # Wait for whatever rewards are still running (a small tail if overlap
+        # worked); shows how many were already done when generation finished.
+        all_futs = [f for g in range(num_groups) for f in reward_futures[g]]
+        eval_bar = make_progress_bar(len(all_futs), desc="evaluating")
+        try:
+            for _ in as_completed(all_futs):
+                eval_bar.update(1)
+        finally:
+            eval_bar.close()
+    finally:
+        reward_pool.shutdown(wait=True)
 
     # ----- SCORE + ADVANTAGE + SAVE + COLLECT TRAINING EXAMPLES -----
     for g, parent in enumerate(parents):
         prompt_text = prompts_by_group[g]
-        responses = group_responses[g]
+        responses = group_responses[g]          # list of (text, token_ids)
+        futs = reward_futures[g]                 # aligned RewardResult futures
         pc = parent_ctxs[g]
 
         rewards = []
         codes = []
         valids = []
         outs = []        # list of RewardResult
-        for r_idx, (text, _, _) in enumerate(responses):
-            res = problem.compute_reward(text, pc, cfg.sandbox_timeout_s)
+        for r_idx, (text, token_ids) in enumerate(responses):
+            res = futs[r_idx].result()           # already computed (or finishes now)
             rewards.append(res.reward)
             codes.append(res.code or "")
             valids.append(res.valid)
@@ -425,7 +476,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
               f"valid={sum(valids)}/{len(valids)}  beta={beta:.4f}")
 
         # Save every rollout (response + meta) to disk for debugging
-        for r_idx, (text, gen_ids, _) in enumerate(responses):
+        for r_idx, (text, token_ids) in enumerate(responses):
             res = outs[r_idx]
             meta = {
                 "step": step_idx,
@@ -439,7 +490,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
                 "msg": res.msg,
                 "advantage": float(advantages[r_idx]) if hasattr(advantages, "__len__") else 0.0,
                 "beta": float(beta),
-                "n_response_tokens": len(gen_ids),
+                "n_response_tokens": len(token_ids),
                 "sandbox_stdout": (res.stdout or "")[:2000],
                 "parent_value": float(parent.value) if parent.value is not None else None,
                 "parent_is_seed": parent.id in sampler._seed_ids,
@@ -447,7 +498,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
             save_rollout(exp_dir, step_idx, g, r_idx, text, meta)
 
         # Children for the sampler
-        for r_idx, (_, _, _) in enumerate(responses):
+        for r_idx, (text, token_ids) in enumerate(responses):
             res = outs[r_idx]
             if valids[r_idx] and codes[r_idx]:
                 child = State.make(
@@ -464,23 +515,19 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
             continue
 
         prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(model.device)
-        for (text, gen_ids, behavior_lps), adv in zip(responses, advantages):
-            if len(gen_ids) == 0:
+        for (text, token_ids), adv in zip(responses, advantages):
+            if len(token_ids) == 0:
                 continue
-            response_ids = torch.tensor([gen_ids], device=model.device)
-            behavior_lp_tensor = (
-                torch.tensor(behavior_lps, device=model.device, dtype=torch.float32)
-                if behavior_lps is not None else None
-            )
+            response_ids = torch.tensor([token_ids], device=model.device)
             all_examples.append({
                 "prompt_ids": prompt_ids,
                 "response_ids": response_ids,
                 "advantage": float(adv),
-                "behavior_logprobs": behavior_lp_tensor,
+                "behavior_logprobs": None,   # IS disabled (workers don't return logprobs)
             })
 
     rollout_time = time.time() - rollout_t0
-    print(f"[step {step_idx}] rollout time: {rollout_time:.1f}s  "
+    print(f"[step {step_idx}] rollout+eval time: {rollout_time:.1f}s  "
           f"training examples: {len(all_examples)}  new children: {len(all_children)}")
 
     # Update archive
@@ -490,7 +537,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         print(f"[step {step_idx}] no training signal (all groups had constant reward)")
         return
 
-    # ----- TRAIN STEP -----
+    # ----- TRAIN STEP (unchanged from your version) -----
     backend.set_training_mode()
     optimizer.zero_grad()
 
@@ -499,10 +546,6 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     total_logp_delta = 0.0
     n_examples = len(all_examples)
 
-    # IS-ratio diagnostics (multi-GPU only). With no policy lag, this ratio
-    # measures only the HF-generation vs Unsloth-scoring numerical gap at the
-    # same weights, so it should sit at ~1.0. A mean far from 1, or a large max,
-    # means either a real backend gap or a token-alignment bug in the worker.
     is_ratio_sum = 0.0
     is_ratio_max = 0.0
     is_ratio_count = 0
@@ -512,34 +555,24 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         rid = ex["response_ids"]
         adv = ex["advantage"]
 
-        # Current policy logprobs (with grad)
         cur_lp = compute_token_logprobs(model, pid, rid, with_grad=True)  # (R,)
 
-        # Base policy logprobs (LoRA disabled)
         try:
             with backend.disable_adapter(), torch.no_grad():
                 base_lp = compute_token_logprobs(model, pid, rid, with_grad=False)
         except Exception as e:
-            # If disable_adapter isn't supported, skip KL (just warn once)
             if not hasattr(train_step, "_kl_warned"):
                 print(f"[warn] disable_adapter failed ({e}); training without KL penalty")
                 train_step._kl_warned = True
             base_lp = cur_lp.detach()
 
-        # KL correction (Tang–Munos baselined form):
-        # advantage_per_token = adv + kl_coef * (mean(logp_diff) - logp_diff_per_token)
         logp_diff = (cur_lp - base_lp).detach()
         avg_logp_diff = logp_diff.mean()
         kl_adv = cfg.kl_penalty_coef * (avg_logp_diff - (cur_lp - base_lp))
-        eff_adv = adv + kl_adv  # broadcasts scalar adv over (R,) kl_adv
+        eff_adv = adv + kl_adv
 
-        # Importance-sampling correction for the sampler/learner mismatch.
-        # behavior_logprobs is None on the single-GPU path (on-policy) -> ratio 1.
         behavior_lp = ex.get("behavior_logprobs")
         if behavior_lp is not None and behavior_lp.shape[0] == cur_lp.shape[0]:
-            # Detached ratio: it reweights the surrogate, it is not differentiated.
-            # In gradient this equals the PPO-style form when ratio ~ 1, which is
-            # the regime here (numerical backend gap, no policy lag).
             is_ratio = torch.exp(cur_lp.detach() - behavior_lp)
             is_ratio_sum += float(is_ratio.mean().item())
             is_ratio_max = max(is_ratio_max, float(is_ratio.max().item()))
@@ -552,15 +585,12 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
                 train_step._is_len_warned = True
             is_ratio = 1.0
 
-        # Loss: -E_token[ IS_ratio * advantage_token * logprob_token ]
         loss = -(is_ratio * eff_adv.detach() * cur_lp).mean()
-        # Average (not sum) grads over the rollouts accumulated this step.
         (loss / n_examples).backward()
 
         total_loss += float(loss.detach().item())
         total_logp_delta += float(logp_diff.mean().item())
 
-    # Gradient clip + optimizer step
     import torch as _torch
     _torch.nn.utils.clip_grad_norm_(
         [p for p in model.parameters() if p.requires_grad],
@@ -582,6 +612,270 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
         raw = f" raw={best.raw_score:.6f}" if best.raw_score is not None else ""
         print(f"[step {step_idx}] best so far: value={best.value:.6f}{raw}  "
               f"(step total {time.time() - step_t0:.1f}s, archive={sampler.archive_size()})")
+
+# # ======================================================================
+# # One training step
+# # ======================================================================
+# def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
+#                cfg: Config, exp_dir, problem, gen_pool=None):
+#     import torch
+
+#     from advantage import entropic_adaptive_advantages
+#     from sampler import State
+#     from experiment_io import save_rollout
+#     from problems.base import ParentContext
+
+#     step_t0 = time.time()
+#     parents = sampler.sample_states(cfg.groups_per_step)
+#     print(f"\n[step {step_idx}] parents picked: {len(parents)}")
+#     for i, info in enumerate(sampler.last_picks_info):
+#         tag = "seed" if info["is_seed"] else "expanded"
+#         print(f"  parent {i} [{tag}]  value={info['value']:.4f}  n={info['n']}  "
+#               f"Q={info['Q']:.4f}  P={info['P']:.4f}  bonus={info['bonus']:.4f}  "
+#               f"score={info['score']:.4f}")
+
+#     all_examples = []
+#     all_children = []
+
+#     # ----- BUILD PROMPTS (one per parent/group) -----
+#     prompts_by_group = []
+#     parent_ctxs = []
+
+#     for g, parent in enumerate(parents):
+#         sampler.record_expansion(parent, count=cfg.group_size)
+#         pc = ParentContext(
+#             code=parent.code,
+#             value=parent.value if parent.value is not None else 0.0,
+#             raw_score=parent.raw_score,
+#             construction=parent.construction,
+#         )
+#         parent_ctxs.append(pc)
+#         messages = problem.build_prompt(pc)
+#         try:
+#             prompt_text = tokenizer.apply_chat_template(
+#                 messages, tokenize=False, add_generation_prompt=True,
+#                 enable_thinking=False,
+#             )
+#         except TypeError:
+#             prompt_text = tokenizer.apply_chat_template(
+#                 messages, tokenize=False, add_generation_prompt=True,
+#             )
+#         prompts_by_group.append(prompt_text)
+
+#     # ----- ROLLOUTS -----
+#     rollout_t0 = time.time()
+
+#     if gen_pool is not None:
+#         # Multi-GPU path: save current LoRA adapter, then generate all groups
+#         # in parallel across all workers. We save every step (including step 0,
+#         # so workers use the same LoRA-wrapped policy the main process has).
+#         #
+#         # Workers now also return per-token behavior logprobs (the sampling
+#         # distribution), so the training step can apply an importance-sampling
+#         # correction for the HF-generation vs Unsloth-scoring backend mismatch.
+#         adapter_path = _save_adapter(model, exp_dir, step_idx)
+
+#         group_responses = gen_pool.generate_groups(
+#             prompts_by_group=prompts_by_group,
+#             group_size=cfg.group_size,
+#             adapter_path=adapter_path,
+#             max_new_tokens=cfg.max_new_tokens,
+#             temperature=cfg.temperature,
+#             top_p=cfg.top_p,
+#         )
+#     else:
+#         # Single-GPU fallback path: sequential generation in this process.
+#         # On-policy (same model, same backend, no lag), so the IS ratio is
+#         # exactly 1. Tag behavior logprobs None to mean "no correction".
+#         backend.set_inference_mode()
+#         group_responses = {}
+#         for g, prompt_text in enumerate(prompts_by_group):
+#             responses, _ = generate_responses(
+#                 model, tokenizer, prompt_text, cfg.group_size, cfg
+#             )
+#             group_responses[g] = [(t, ids, None) for (t, ids) in responses]
+
+#     # ----- SCORE + ADVANTAGE + SAVE + COLLECT TRAINING EXAMPLES -----
+#     for g, parent in enumerate(parents):
+#         prompt_text = prompts_by_group[g]
+#         responses = group_responses[g]
+#         pc = parent_ctxs[g]
+
+#         rewards = []
+#         codes = []
+#         valids = []
+#         outs = []        # list of RewardResult
+#         for r_idx, (text, _, _) in enumerate(responses):
+#             res = problem.compute_reward(text, pc, cfg.sandbox_timeout_s)
+#             rewards.append(res.reward)
+#             codes.append(res.code or "")
+#             valids.append(res.valid)
+#             outs.append(res)
+
+#         rewards_np = np.array(rewards, dtype=np.float64)
+#         advantages, beta = entropic_adaptive_advantages(rewards_np)
+#         print(f"  group {g}: rewards min={rewards_np.min():.4f} "
+#               f"mean={rewards_np.mean():.4f} max={rewards_np.max():.4f}  "
+#               f"valid={sum(valids)}/{len(valids)}  beta={beta:.4f}")
+
+#         # Save every rollout (response + meta) to disk for debugging
+#         for r_idx, (text, gen_ids, _) in enumerate(responses):
+#             res = outs[r_idx]
+#             meta = {
+#                 "step": step_idx,
+#                 "group": g,
+#                 "rollout": r_idx,
+#                 "reward": float(rewards[r_idx]),
+#                 "raw_score": (float(res.raw_score) if res.raw_score is not None else None),
+#                 "valid": bool(valids[r_idx]),
+#                 "parsed": bool(res.parsed),
+#                 "ran": bool(res.ran),
+#                 "msg": res.msg,
+#                 "advantage": float(advantages[r_idx]) if hasattr(advantages, "__len__") else 0.0,
+#                 "beta": float(beta),
+#                 "n_response_tokens": len(gen_ids),
+#                 "sandbox_stdout": (res.stdout or "")[:2000],
+#                 "parent_value": float(parent.value) if parent.value is not None else None,
+#                 "parent_is_seed": parent.id in sampler._seed_ids,
+#             }
+#             save_rollout(exp_dir, step_idx, g, r_idx, text, meta)
+
+#         # Children for the sampler
+#         for r_idx, (_, _, _) in enumerate(responses):
+#             res = outs[r_idx]
+#             if valids[r_idx] and codes[r_idx]:
+#                 child = State.make(
+#                     timestep=step_idx,
+#                     value=rewards[r_idx],
+#                     code=codes[r_idx],
+#                     raw_score=res.raw_score,
+#                     construction=res.construction,
+#                 )
+#                 all_children.append((child, parent))
+
+#         # If reward is constant in this group, no training signal
+#         if float(rewards_np.max() - rewards_np.min()) < 1e-12:
+#             continue
+
+#         prompt_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(model.device)
+#         for (text, gen_ids, behavior_lps), adv in zip(responses, advantages):
+#             if len(gen_ids) == 0:
+#                 continue
+#             response_ids = torch.tensor([gen_ids], device=model.device)
+#             behavior_lp_tensor = (
+#                 torch.tensor(behavior_lps, device=model.device, dtype=torch.float32)
+#                 if behavior_lps is not None else None
+#             )
+#             all_examples.append({
+#                 "prompt_ids": prompt_ids,
+#                 "response_ids": response_ids,
+#                 "advantage": float(adv),
+#                 "behavior_logprobs": behavior_lp_tensor,
+#             })
+
+#     rollout_time = time.time() - rollout_t0
+#     print(f"[step {step_idx}] rollout time: {rollout_time:.1f}s  "
+#           f"training examples: {len(all_examples)}  new children: {len(all_children)}")
+
+#     # Update archive
+#     sampler.update(all_children)
+
+#     if not all_examples:
+#         print(f"[step {step_idx}] no training signal (all groups had constant reward)")
+#         return
+
+#     # ----- TRAIN STEP -----
+#     backend.set_training_mode()
+#     optimizer.zero_grad()
+
+#     train_t0 = time.time()
+#     total_loss = 0.0
+#     total_logp_delta = 0.0
+#     n_examples = len(all_examples)
+
+#     # IS-ratio diagnostics (multi-GPU only). With no policy lag, this ratio
+#     # measures only the HF-generation vs Unsloth-scoring numerical gap at the
+#     # same weights, so it should sit at ~1.0. A mean far from 1, or a large max,
+#     # means either a real backend gap or a token-alignment bug in the worker.
+#     is_ratio_sum = 0.0
+#     is_ratio_max = 0.0
+#     is_ratio_count = 0
+
+#     for ex in all_examples:
+#         pid = ex["prompt_ids"]
+#         rid = ex["response_ids"]
+#         adv = ex["advantage"]
+
+#         # Current policy logprobs (with grad)
+#         cur_lp = compute_token_logprobs(model, pid, rid, with_grad=True)  # (R,)
+
+#         # Base policy logprobs (LoRA disabled)
+#         try:
+#             with backend.disable_adapter(), torch.no_grad():
+#                 base_lp = compute_token_logprobs(model, pid, rid, with_grad=False)
+#         except Exception as e:
+#             # If disable_adapter isn't supported, skip KL (just warn once)
+#             if not hasattr(train_step, "_kl_warned"):
+#                 print(f"[warn] disable_adapter failed ({e}); training without KL penalty")
+#                 train_step._kl_warned = True
+#             base_lp = cur_lp.detach()
+
+#         # KL correction (Tang–Munos baselined form):
+#         # advantage_per_token = adv + kl_coef * (mean(logp_diff) - logp_diff_per_token)
+#         logp_diff = (cur_lp - base_lp).detach()
+#         avg_logp_diff = logp_diff.mean()
+#         kl_adv = cfg.kl_penalty_coef * (avg_logp_diff - (cur_lp - base_lp))
+#         eff_adv = adv + kl_adv  # broadcasts scalar adv over (R,) kl_adv
+
+#         # Importance-sampling correction for the sampler/learner mismatch.
+#         # behavior_logprobs is None on the single-GPU path (on-policy) -> ratio 1.
+#         behavior_lp = ex.get("behavior_logprobs")
+#         if behavior_lp is not None and behavior_lp.shape[0] == cur_lp.shape[0]:
+#             # Detached ratio: it reweights the surrogate, it is not differentiated.
+#             # In gradient this equals the PPO-style form when ratio ~ 1, which is
+#             # the regime here (numerical backend gap, no policy lag).
+#             is_ratio = torch.exp(cur_lp.detach() - behavior_lp)
+#             is_ratio_sum += float(is_ratio.mean().item())
+#             is_ratio_max = max(is_ratio_max, float(is_ratio.max().item()))
+#             is_ratio_count += 1
+#         else:
+#             if behavior_lp is not None and not hasattr(train_step, "_is_len_warned"):
+#                 print(f"[warn] behavior/current logprob length mismatch "
+#                       f"({behavior_lp.shape[0]} vs {cur_lp.shape[0]}); "
+#                       f"skipping IS for affected examples")
+#                 train_step._is_len_warned = True
+#             is_ratio = 1.0
+
+#         # Loss: -E_token[ IS_ratio * advantage_token * logprob_token ]
+#         loss = -(is_ratio * eff_adv.detach() * cur_lp).mean()
+#         # Average (not sum) grads over the rollouts accumulated this step.
+#         (loss / n_examples).backward()
+
+#         total_loss += float(loss.detach().item())
+#         total_logp_delta += float(logp_diff.mean().item())
+
+#     # Gradient clip + optimizer step
+#     import torch as _torch
+#     _torch.nn.utils.clip_grad_norm_(
+#         [p for p in model.parameters() if p.requires_grad],
+#         max_norm=cfg.grad_clip,
+#     )
+#     optimizer.step()
+
+#     train_time = time.time() - train_t0
+#     is_msg = ""
+#     if is_ratio_count > 0:
+#         is_msg = (f"  IS ratio mean={is_ratio_sum / is_ratio_count:.4f} "
+#                   f"max={is_ratio_max:.3f}")
+#     print(f"[step {step_idx}] train time: {train_time:.1f}s  "
+#           f"avg loss: {total_loss / n_examples:.4f}  "
+#           f"avg logpi_theta - logpi_base: {total_logp_delta / n_examples:.4f}{is_msg}")
+
+#     best = sampler.best_state()
+#     if best is not None:
+#         raw = f" raw={best.raw_score:.6f}" if best.raw_score is not None else ""
+#         print(f"[step {step_idx}] best so far: value={best.value:.6f}{raw}  "
+#               f"(step total {time.time() - step_t0:.1f}s, archive={sampler.archive_size()})")
 
 
 # ======================================================================

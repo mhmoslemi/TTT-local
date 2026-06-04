@@ -1,0 +1,153 @@
+<strategy>
+To improve the circle packing in a unit square for 26 circles, we need to refine both the initial arrangement and the optimization strategy. Here's the step-by-step plan:
+
+1. **Initial Arrangement Strategy**:
+   - The previous hexagonal close-packed (HCP) arrangement was used, but it's quite dense and lacks the flexibility to place circles near the boundaries. A better initial configuration is a mix of hexagonal packing for the interior and boundary-aware placement for circles near the edges.
+   - We will use a more compact hexagonal arrangement with additional circles positioned near the corners and edges to maximize the utilization of space.
+
+2. **Optimization Strategy**:
+   - The previous SLSQP optimization may not be optimal due to its sensitivity to the initial guess and constraints. We will use a hybrid strategy:
+     - First, place the circles near boundaries using a grid where each circle is assigned to a grid cell near the square’s edge.
+     - Then, use a more sophisticated optimizer like `nlopt` (via `scipy.optimize`) with a different method (e.g., `LN_SBPLX`) that can better handle non-convex optimization problems.
+   - We will also include boundary-aware constraints that adjust circle sizes based on their proximity to the boundary to prevent clipping.
+
+3. **Constraint Handling**:
+   - We will explicitly include non-overlapping constraints and boundary constraints to ensure circles remain within the unit square and do not overlap.
+   - Radius constraints that grow slightly larger near the edges will allow for more optimal packing as the circles can expand toward the boundary.
+
+4. **Post-Optimization Adjustments**:
+   - After optimization, we'll check for overlaps again and adjust radii slightly to ensure compliance with the boundary and non-overlapping constraints.
+   - We will also consider a "refinement pass" where circles are moved slightly to fill in small gaps or optimize placement further.
+
+5. **Final Output**:
+   - The function will return optimized centers and radii with the sum of radii.
+
+</strategy>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import cdist
+import math
+
+def run_packing():
+    n = 26
+    # Generate a more optimal initial placement of circles with boundary awareness
+    centers = np.zeros((n, 2))
+    radii = np.zeros(n)
+    
+    # Initialize with a hexagonal close-packed interior layout
+    rows = 5
+    cols = 5
+    spacing = 0.75
+    for i in range(rows):
+        for j in range(cols):
+            x = j * spacing
+            y = i * spacing * np.sqrt(3) / 2
+            if i % 2 == 1:
+                x += spacing / 2
+            center = np.array([x, y])
+            # Ensure the circle is within bounds
+            if center[0] < 0:
+                center[0] = 0
+            elif center[0] > 1:
+                center[0] = 1
+            if center[1] < 0:
+                center[1] = 0
+            elif center[1] > 1:
+                center[1] = 1
+            centers[i * cols + j] = center
+            radii[i * cols + j] = 0.05  # Initial radius
+
+    # Add circles near the boundaries for better utilization
+    boundary_circles = [
+        (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),
+        (0.1, 0.5), (0.5, 0.1), (0.5, 0.9), (0.9, 0.5),
+        (0.3, 0.2), (0.7, 0.2), (0.3, 0.8), (0.7, 0.8),
+        (0.2, 0.3), (0.8, 0.3), (0.2, 0.7), (0.8, 0.7),
+        (0.4, 0.4), (0.6, 0.4), (0.4, 0.6), (0.6, 0.6),
+        (0.15, 0.15), (0.85, 0.15), (0.15, 0.85), (0.85, 0.85),
+    ]
+    
+    for idx, (x, y) in enumerate(boundary_circles):
+        if idx >= n:
+            break
+        centers[idx] = [x, y]
+        radii[idx] = 0.05
+
+    # Objective function to maximize the total sum of radii
+    def objective(radii):
+        return -np.sum(radii)  # Negative because we are minimizing
+
+    # Constraint: all circles must be within the unit square
+    def boundary_constraints(radii):
+        return [radii[i] + centers[i, 0] <= 1 + 1e-8 for i in range(n)] + \
+               [radii[i] + centers[i, 1] <= 1 + 1e-8 for i in range(n)] + \
+               [radii[i] - centers[i, 0] >= 0 - 1e-8 for i in range(n)] + \
+               [radii[i] - centers[i, 1] >= 0 - 1e-8 for i in range(n)]
+
+    # Constraint: circles cannot overlap
+    def non_overlap_constraints(radii):
+        constraints = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist_sq = dx*dx + dy*dy
+                min_dist = radii[i] + radii[j]
+                if dist_sq < (min_dist - 1e-8) ** 2:
+                    constraints.append(-dist_sq + (min_dist - 1e-8) ** 2)
+        return constraints
+
+    # Optimization bounds
+    bounds = [(0.0, 1.0) for _ in range(n)]
+
+    # Initial guess is the initial radii
+    initial_guess = radii.copy()
+
+    # Optimize using SLSQP with tight constraints
+    result = minimize(
+        fun=objective,
+        x0=initial_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=[{'type': 'ineq', 'fun': boundary_constraints},
+                     {'type': 'ineq', 'fun': non_overlap_constraints}]
+    )
+
+    if not result.success:
+        print("Optimization failed")
+        return np.zeros((n, 2)), np.zeros(n), 0.0
+
+    optimized_radii = result.x
+    optimized_sum = np.sum(optimized_radii)
+
+    # Check and adjust radii to avoid clipping near the square boundaries
+    for i in range(n):
+        x, y = centers[i]
+        if x - optimized_radii[i] < -1e-8 or x + optimized_radii[i] > 1 + 1e-8:
+            optimized_radii[i] = min(optimized_radii[i], 1 - x)
+            optimized_radii[i] = min(optimized_radii[i], x)
+        if y - optimized_radii[i] < -1e-8 or y + optimized_radii[i] > 1 + 1e-8:
+            optimized_radii[i] = min(optimized_radii[i], 1 - y)
+            optimized_radii[i] = min(optimized_radii[i], y)
+
+    # Final check for overlapping circles
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = centers[i, 0] - centers[j, 0]
+            dy = centers[i, 1] - centers[j, 1]
+            dist_sq = dx*dx + dy*dy
+            if dist_sq < (optimized_radii[i] + optimized_radii[j] - 1e-8) ** 2:
+                # Adjust radii to prevent overlap
+                overlap = (optimized_radii[i] + optimized_radii[j]) - np.sqrt(dist_sq)
+                optimized_radii[i] -= overlap / 2
+                optimized_radii[j] -= overlap / 2
+                optimized_radii[i] = max(optimized_radii[i], 0)
+                optimized_radii[j] = max(optimized_radii[j], 0)
+
+    # Ensure non-negative radii
+    optimized_radii = np.maximum(optimized_radii, 0)
+
+    return centers, optimized_radii, np.sum(optimized_radii)
+```

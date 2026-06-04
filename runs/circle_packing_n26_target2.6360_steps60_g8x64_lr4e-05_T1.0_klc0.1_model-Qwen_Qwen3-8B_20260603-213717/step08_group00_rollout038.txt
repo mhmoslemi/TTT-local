@@ -1,0 +1,214 @@
+<strategy>
+To further improve the packing of 26 circles in a unit square, we can take the following steps:
+
+### Key Improvements Strategy
+
+#### 1. **Optimize Initial Placement**
+- The current initial placement uses a hybrid hexagonal + dense grid, but may not optimally distribute circles in the square.
+- A better strategy is to use a **hexagonal packing** starting from the center outward, carefully calculating positions to ensure even spacing and minimal boundary effects.
+- Additionally, **reposition points in corners and edges** to allow for better expansion of radii toward the boundaries.
+
+#### 2. **Enhance Optimization Technique**
+- The current optimization uses **SLSQP** (Sequential Least Squares Programming), which is appropriate for constrained optimization.
+- However, we can improve **convergence** and **robustness** by:
+  - Adding **more aggressive perturbations** in the initial guess to escape local optima.
+  - Using **multiple starting positions** with diverse configurations (e.g., by randomizing initial radii and centers).
+  - Implementing **multi-start optimization** with **different initial arrangements**.
+
+#### 3. **Refine Optimization Objectives**
+- The objective function currently aims to **maximize sum of radii**, which is correct.
+- To ensure **equilibrium**, we should **balance** the radii distribution, encouraging **similar circle sizes** to prevent one or two circles from taking up too much space.
+
+#### 4. **Boundary and Corner Placement Strategy**
+- **Corner and edge placements** should allow circles to grow freely in those directions.
+- The current edge points may not be optimally placed, so we can **refine the edge points** to allow for larger radii near corners.
+
+#### 5. **Add New Constraints for Efficiency**
+- To improve performance and stability of the optimization, **add new constraints** such as:
+  - Maximum and minimum bounds on radii (to prevent too small or too large circles).
+  - Constraints to ensure even distribution of circles across the square (to avoid clustering).
+  - Ensure the algorithm does **not get stuck** in local optima by diversifying the initial guesses.
+
+#### 6. **Refine Grid Placement for 26 Circles**
+- A 26-circle packing is a dense configuration.
+- A **nested hexagonal packing** with an outer ring may allow the circles to expand better due to the symmetry and reduced constraint from the outer circle.
+- We can build the initial centers using a combination of:
+  - A central dense cluster.
+  - Hexagonal layers expanding outwards.
+  - Additional dense points at corners to maximize boundary radii.
+
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+
+    # Define initial positions using a nested hexagonal + corner dense packing
+    centers = np.zeros((n, 2))
+    radii = np.zeros(n)
+
+    # Generate a nested hexagonal grid with layers
+    hex_centers = []
+    layer_radii = [1.0, 0.75, 0.5, 0.3]  # Radii for each layer
+    directions = [(0, 1), (1, 0), (0.5, np.sqrt(3)/2), (-0.5, np.sqrt(3)/2), (-1, 0), (-0.5, -np.sqrt(3)/2)]
+
+    for layer in range(4):
+        for direction in directions:
+            x = 0.5 + layer_radii[layer] * direction[0]
+            y = 0.5 + layer_radii[layer] * direction[1]
+            hex_centers.append((x, y))
+
+    # Add corner and edge dense points
+    edge_points = [
+        (0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8),
+        (0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75),
+        (0.1, 0.5), (0.5, 0.1), (0.5, 0.9), (0.9, 0.5),
+        (0.15, 0.15), (0.85, 0.15), (0.85, 0.85), (0.15, 0.85)
+    ]
+
+    hex_centers += edge_points
+
+    # Remove duplicates and get first n points
+    hex_centers = list(set(hex_centers))
+    hex_centers = [np.array(p) for p in hex_centers]
+    centers[:n] = np.array(hex_centers[:n])
+
+    # Initial radii: based on minimum distance between points
+    distances = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = centers[i, 0] - centers[j, 0]
+            dy = centers[i, 1] - centers[j, 1]
+            dist = np.hypot(dx, dy)
+            distances.append(dist)
+
+    if distances:
+        initial_radius = min(distances) / 2.0
+    else:
+        initial_radius = 0.1
+
+    # Assign initial radii
+    radii[:n] = initial_radius
+
+    # Optimization function that maximizes the sum of radii
+    def objective(x):
+        # x contains first 2n entries for centers, then n entries for radii
+        centers_flat = x[:2 * n]
+        radii_flat = x[2 * n:]
+        return -np.sum(radii_flat)  # minimize negative sum to maximize sum
+
+    # Flatten centers and radii for optimization
+    centers_vec = centers.flatten()
+    radii_vec = radii.flatten()
+
+    # Bounds for centers and radii (must be non-negative and within [0,1] x [0,1])
+    bounds = [(0, 1) for _ in range(2 * n)]  # centers
+    bounds += [(0, 1) for _ in range(n)]     # radii
+
+    def constraints(x):
+        centers_flat = x[:2 * n]
+        radii_flat = x[2 * n:]
+        centers = centers_flat.reshape((n, 2))
+        radii = radii_flat
+
+        # Non-overlapping constraints: dist(c_i, c_j) >= r_i + r_j
+        non_overlap_constraints = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist = np.hypot(dx, dy)
+                constraint = dist - radii[i] - radii[j]
+                non_overlap_constraints.append(constraint)
+
+        # Boundary constraints: x - r >= 0, x + r <= 1, same for y
+        boundary_constraints = []
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            boundary_constraints.append(x - r)
+            boundary_constraints.append(1 - x - r)
+            boundary_constraints.append(y - r)
+            boundary_constraints.append(1 - y - r)
+
+        return np.concatenate([non_overlap_constraints, boundary_constraints])
+
+    # Multi-start optimization with diverse starting points
+    best_sum = 0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    # Run optimization with multiple initial seeds
+    for _ in range(50):  # Increased number of trials
+        # Randomly perturb initial positions to break symmetry
+        perturbation = np.random.uniform(-0.1, 0.1, size=(n, 2))
+        centers_perturbed = centers + perturbation
+        centers_perturbed = np.clip(centers_perturbed, 0, 1)
+
+        # Set initial radii
+        radii_perturbed = radii.copy()
+
+        # Flatten and optimize
+        x0 = np.concatenate([centers_perturbed.flatten(), radii_perturbed])
+        try:
+            result = opt.minimize(
+                fun=lambda x: objective(x),
+                x0=x0,
+                method='SLSQP',
+                bounds=bounds,
+                constraints={'type': 'ineq', 'fun': constraints},
+                tol=1e-8
+            )
+        except:
+            continue  # Skip if optimization fails due to constraints or other issues
+
+        # Check if the result is valid
+        if result.success:
+            current_centers = result.x[:2 * n].reshape((n, 2))
+            current_radii = result.x[2 * n:]
+            current_sum = np.sum(current_radii)
+
+            # Validate the packing
+            valid, msg = validate_packing(current_centers, current_radii)
+            if valid and current_sum > best_sum:
+                best_sum = current_sum
+                best_centers = current_centers
+                best_radii = current_radii
+
+    # Final validation
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        raise ValueError(msg)
+
+    return best_centers, best_radii, best_sum
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = centers[i, 0] - centers[j, 0]
+            dy = centers[i, 1] - centers[j, 1]
+            dist = np.hypot(dx, dy)
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```

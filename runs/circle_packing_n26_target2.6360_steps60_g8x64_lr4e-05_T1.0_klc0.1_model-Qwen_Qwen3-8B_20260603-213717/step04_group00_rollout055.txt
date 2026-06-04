@@ -1,0 +1,262 @@
+<strategy>
+To improve the current packing of 26 circles in a unit square, we need to refine our strategy to better utilize the space and increase the sum of radii. Here is the detailed plan:
+
+1. **Refine Initial Configuration**: The current configuration uses a hybrid hexagonal grid with corner points. Improving the initial arrangement could lead to more optimal packing. We'll try denser and more optimized arrangements like:
+   - A hexagonal packing in the center and a denser arrangement near the boundaries.
+   - A more strategic placement of circles to avoid symmetry and gaps.
+   - Consider using Voronoi tessellation or Delaunay triangulation to generate an initial point set.
+
+2. **Optimize Initial Configuration with Genetic Algorithm**: A genetic algorithm can explore more diverse and non-symmetric initial arrangements by simulating evolution, which might find better local optima than simple perturbations.
+
+3. **Improve Optimization Strategy**: Current optimization uses the SLSQP method with multiple start points. We can:
+   - Try different optimization algorithms, e.g., `COBYLA`, which handles bounds well.
+   - Use a larger number of initial configurations to escape local optima.
+   - Explore more sophisticated constraints and penalties for better convergence.
+
+4. **Refine Boundary Utilization**: The current packing may not fully utilize the corners and edges. We can:
+   - Add more points near the corners to take advantage of the larger available space.
+   - Use different strategies for boundary circles—such as making them slightly larger to push other circles inward.
+
+5. **Use Constraints More Effectively**: We can:
+   - Introduce a penalty term in the objective function to discourage overlap, which can help in better optimization.
+   - Use an adaptive tolerance during optimization to allow for tighter convergence.
+   - Consider using a hybrid approach of local and global optimization.
+
+6. **Add Additional Points or Adjust Distribution**: By adding extra points or slightly adjusting existing ones, we can fill in gaps and allow for better radial distribution and packing efficiency.
+
+7. **Use Custom Initialization with Genetic Algorithm**: We'll use a genetic algorithm to sample many initial configurations and select the best ones, then proceed with the SLSQP optimization on top of those.
+
+By combining these strategies, we can expect a better packing, potentially exceeding the target sum of radii of 2.636.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import random
+from typing import Tuple, List, Dict
+
+def run_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+
+    # Genetic algorithm parameters
+    population_size = 50
+    generations = 20
+    mutation_rate = 0.1
+    crossover_rate = 0.8
+    elite_ratio = 0.2
+    
+    # Generate initial population of random configurations
+    def generate_initial_population():
+        population = []
+        for _ in range(population_size):
+            centers = np.random.rand(n, 2)
+            radii = np.random.rand(n)
+            # Ensure radii are feasible based on minimal distances
+            dists = np.zeros(n * n)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dists[i * n + j] = np.hypot(centers[i, 0] - centers[j, 0],
+                                                centers[i, 1] - centers[j, 1])
+            min_dist = np.min(dists[dists > 0]) if np.any(dists > 0) else 1.0
+            radii = np.clip(radii, 0, min_dist / 2.0)
+            population.append((centers, radii))
+        return population
+
+    population = generate_initial_population()
+
+    # Fitness function
+    def fitness(centers, radii):
+        try:
+            valid, _ = validate_packing(centers, radii)
+            if not valid:
+                return 0.0  # Penalize invalid solutions
+            return np.sum(radii)
+        except:
+            return 0.0
+
+    # Genetic algorithm
+    for generation in range(generations):
+        # Evaluate fitness
+        fitness_scores = []
+        for i, (centers, radii) in enumerate(population):
+            fitness_scores.append((fitness(centers, radii), i, centers, radii))
+        
+        # Sort by fitness
+        fitness_scores.sort(reverse=True)
+        best_fitness, best_index, best_centers, best_radii = fitness_scores[0]
+        
+        # Select elites
+        elite_count = int(len(population) * elite_ratio)
+        elites = [(centers, radii) for (_, _, centers, radii) in fitness_scores[:elite_count]]
+        
+        # Generate new population
+        new_population = elites[:]
+        while len(new_population) < population_size:
+            parent1, parent2 = random.choices(fitness_scores, k=2)
+            parent1_idx, parent1_centers, parent1_radii = parent1[1], parent1[2], parent1[3]
+            parent2_idx, parent2_centers, parent2_radii = parent2[1], parent2[2], parent2[3]
+            
+            # Crossover
+            if random.random() < crossover_rate:
+                child_centers = np.zeros((n, 2))
+                child_radii = np.zeros(n)
+                for i in range(n):
+                    if random.random() < 0.5:
+                        child_centers[i] = parent1_centers[i]
+                        child_radii[i] = parent1_radii[i]
+                    else:
+                        child_centers[i] = parent2_centers[i]
+                        child_radii[i] = parent2_radii[i]
+            else:
+                child_centers = parent1_centers.copy()
+                child_radii = parent1_radii.copy()
+            
+            # Mutation
+            for i in range(n):
+                if random.random() < mutation_rate:
+                    # Move center slightly
+                    delta = np.random.uniform(-0.05, 0.05, size=2)
+                    child_centers[i] += delta
+                    child_centers[i] = np.clip(child_centers[i], 0, 1)
+                    
+                    # Adjust radius
+                    min_dist = np.inf
+                    for j in range(n):
+                        if i == j:
+                            continue
+                        dist = np.hypot(child_centers[i, 0] - child_centers[j, 0],
+                                        child_centers[i, 1] - child_centers[j, 1])
+                        min_dist = min(min_dist, dist)
+                    child_radii[i] = np.clip(child_radii[i] + np.random.uniform(-0.05, 0.05),
+                                            0, min_dist / 2.0)
+            
+            new_population.append((child_centers, child_radii))
+        
+        population = new_population
+    
+    # Select the best solution from the final population
+    best_fitness = -1
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+    for centers, radii in population:
+        f = fitness(centers, radii)
+        if f > best_fitness:
+            best_fitness = f
+            best_centers = centers
+            best_radii = radii
+
+    # Final optimization using SLSQP
+    def objective(x):
+        # x contains first 2n entries for centers, then n entries for radii
+        centers_flat = x[:2 * n]
+        radii_flat = x[2 * n:]
+        return -np.sum(radii_flat)  # minimize negative sum to maximize sum
+
+    # Flatten centers and radii for optimization
+    centers_vec = best_centers.flatten()
+    radii_vec = best_radii.flatten()
+
+    # Bounds for centers and radii (must be non-negative and within [0,1] x [0,1])
+    bounds = [(0, 1) for _ in range(2 * n)]  # centers
+    bounds += [(0, 1) for _ in range(n)]     # radii
+
+    def constraints(x):
+        centers_flat = x[:2 * n]
+        radii_flat = x[2 * n:]
+        centers = centers_flat.reshape((n, 2))
+        radii = radii_flat
+
+        # Non-overlapping constraints: dist(c_i, c_j) >= r_i + r_j
+        non_overlap_constraints = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist = np.hypot(dx, dy)
+                constraint = dist - radii[i] - radii[j]
+                non_overlap_constraints.append(constraint)
+
+        # Boundary constraints: x - r >= 0, x + r <= 1, same for y
+        boundary_constraints = []
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            boundary_constraints.append(x - r)
+            boundary_constraints.append(1 - x - r)
+            boundary_constraints.append(y - r)
+            boundary_constraints.append(1 - y - r)
+
+        return np.concatenate([non_overlap_constraints, boundary_constraints])
+
+    # Multi-start optimization
+    best_sum = 0
+    best_centers_opt = np.zeros((n, 2))
+    best_radii_opt = np.zeros(n)
+
+    # Run optimization with multiple initial seeds
+    for _ in range(5):
+        # Randomly perturb initial positions to break symmetry
+        perturbation = np.random.uniform(-0.05, 0.05, size=(n, 2))
+        centers_perturbed = best_centers + perturbation
+        centers_perturbed = np.clip(centers_perturbed, 0, 1)
+
+        # Set initial radii
+        radii_perturbed = best_radii.copy()
+
+        # Flatten and optimize
+        x0 = np.concatenate([centers_perturbed.flatten(), radii_perturbed])
+        result = opt.minimize(
+            fun=lambda x: objective(x),
+            x0=x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints={'type': 'ineq', 'fun': constraints},
+            tol=1e-6
+        )
+
+        # Check if the result is valid
+        if result.success:
+            current_centers = result.x[:2 * n].reshape((n, 2))
+            current_radii = result.x[2 * n:]
+            current_sum = np.sum(current_radii)
+
+            # Validate the packing
+            valid, msg = validate_packing(current_centers, current_radii)
+            if valid and current_sum > best_sum:
+                best_sum = current_sum
+                best_centers_opt = current_centers
+                best_radii_opt = current_radii
+
+    # Final validation
+    valid, msg = validate_packing(best_centers_opt, best_radii_opt)
+    if not valid:
+        raise ValueError(msg)
+
+    return best_centers_opt, best_radii_opt, best_sum
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.hypot(centers[i][0] - centers[j][0],
+                            centers[i][1] - centers[j][1])
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```

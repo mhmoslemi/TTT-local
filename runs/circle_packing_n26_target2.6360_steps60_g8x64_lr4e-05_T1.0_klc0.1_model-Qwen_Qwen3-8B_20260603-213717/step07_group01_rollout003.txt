@@ -1,0 +1,247 @@
+<strategy>
+To achieve a higher sum of radii for 26 circles packed in a unit square, we can consider several improvements and innovations over the previous packing strategy.
+
+### Key Improvements:
+1. **Optimal Boundary and Corner Utilization**:
+   - The current setup uses boundary points but could benefit from a more dense sampling near the edges and corners, especially for minimizing the "wasted space" along the unit square borders. More circles should be strategically placed near boundaries where they can expand without overlapping other circles.
+
+2. **Improved Arrangement Strategy**:
+   - Instead of using a dense grid and boundary sampling, we could try a hybrid approach:
+     - A **hexagonal packing** in the center for better density.
+     - A **nested radial layout** near the corners to allow larger radii without overlapping.
+     - A **boundary-optimized grid** with more precise control of the spacing between circles near the edges.
+
+3. **Multi-Stage Optimization**:
+   - We use a **two-stage optimization**:
+     - **Initial local optimization** with SLSQP to refine a promising layout.
+     - **Global simulated annealing** to explore better configurations in the search space.
+   - We can further enhance the simulated annealing process by:
+     - Reducing the perturbation magnitude early on and increasing it for more global exploration.
+     - Using adaptive cooling schedules to allow more exploration at higher temperatures and fine-tuning later.
+
+4. **Refined Initialization Strategy**:
+   - The current grid sampling is somewhat arbitrary. A more structured and dense initialization should be used.
+   - We can generate the initial centers using **hexagonal packing** principles in the center and add additional points near boundaries and corners.
+
+5. **Constraint Handling**:
+   - We can use a tighter tolerance for the constraints, especially for the non-overlapping and boundary conditions. This helps in ensuring no circles escape the unit square or overlap.
+
+6. **Radius Initialization**:
+   - Instead of initializing all circles with a uniform radius, we could initialize the radii based on their distance from the nearest circle and boundaries, ensuring more circles can have a larger radius without violating constraints.
+
+### Final Plan:
+- Use a **hybrid hexagonal and radial layout** to initialize the centers, placing more points near the boundaries and corners.
+- Perform a **two-stage optimization**:
+  - First, use **SLSQP** to refine a local optimal layout.
+  - Then, use **simulated annealing** with adaptive cooling schedules to explore the search space more thoroughly.
+- Tighten the optimization constraints and increase tolerance for better precision and validation.
+
+This strategy balances between **high precision** and **global exploration**, and it aims to achieve a better total radius sum.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+
+    # Generate centers using a hybrid hexagonal and radial layout
+    # Hexagonal packing in the center
+    hex_centers = []
+    for r in range(5):
+        for theta in np.linspace(0, 2 * np.pi, 6, endpoint=False):
+            x = 0.5 + r * np.cos(theta)
+            y = 0.5 + r * np.sin(theta)
+            hex_centers.append((x, y))
+
+    # Random boundary points with more spacing for boundary utilization
+    boundary_centers = []
+    for i in range(10):
+        angle = np.random.uniform(0, 2 * np.pi)
+        r = np.random.uniform(0.2, 0.4)
+        x = np.random.uniform(0.05, 0.95)
+        y = np.random.uniform(0.05, 0.95)
+        boundary_centers.append((x, y))
+
+    # Combine and adjust to fit within the unit square
+    centers = np.array(hex_centers + boundary_centers)
+    centers = np.unique(centers, axis=0)
+    centers = centers[:n]
+
+    # Clip centers to the unit square
+    centers = np.clip(centers, 0, 1)
+
+    # Compute initial radius based on shortest distance to neighbors and boundaries
+    distances = []
+    for i in range(len(centers)):
+        for j in range(i + 1, len(centers)):
+            dist = np.hypot(centers[i][0] - centers[j][0], centers[i][1] - centers[j][1])
+            distances.append(dist)
+
+    # Get the minimum distance to the boundary
+    min_boundary_dist = min([min(0.05, c[0]) for c in centers] +
+                            [min(0.05, 1 - c[0]) for c in centers] +
+                            [min(0.05, c[1]) for c in centers] +
+                            [min(0.05, 1 - c[1]) for c in centers])
+
+    if distances:
+        initial_radius = min(min(distances) / 2.0, min_boundary_dist)
+    else:
+        initial_radius = 0.1
+
+    # Optimization: maximize sum of radii with constraints
+    def objective(vars):
+        # Split the variables into centers and radii
+        center_vars = vars[:2 * n].reshape(n, 2)
+        radius_vars = vars[2 * n:]
+        
+        # Compute the sum of radii
+        return -np.sum(radius_vars)  # minimize negative sum to maximize sum
+
+    def constraints(vars):
+        # Split the variables into centers and radii
+        center_vars = vars[:2 * n].reshape(n, 2)
+        radius_vars = vars[2 * n:]
+        
+        # Non-overlapping constraints: dist(c_i, c_j) >= r_i + r_j
+        non_overlap_constraints = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.hypot(center_vars[i][0] - center_vars[j][0],
+                                center_vars[i][1] - center_vars[j][1])
+                constraint = dist - radius_vars[i] - radius_vars[j]
+                non_overlap_constraints.append(constraint)
+        
+        # Boundary constraints: x - r >= 0, x + r <= 1, same for y
+        boundary_constraints = []
+        for i in range(n):
+            x, y = center_vars[i]
+            r = radius_vars[i]
+            boundary_constraints.append(x - r)
+            boundary_constraints.append(1 - x - r)
+            boundary_constraints.append(y - r)
+            boundary_constraints.append(1 - y - r)
+        
+        return np.concatenate([non_overlap_constraints, boundary_constraints])
+
+    # Initial guess: centers are fixed, radii are uniform
+    initial_centers = centers.reshape(n * 2)
+    initial_radii = np.full(n, initial_radius)
+    initial_guess = np.concatenate([initial_centers, initial_radii])
+
+    # Optimization bounds: center coordinates in [0,1], radii >= 0
+    bounds = []
+    for _ in range(n):
+        bounds.append((0, 1))  # x
+        bounds.append((0, 1))  # y
+        bounds.append((0, 1))  # radius
+
+    # Use SLSQP for local optimization
+    result_local = opt.minimize(
+        fun=objective,
+        x0=initial_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints={'type': 'ineq', 'fun': constraints},
+        tol=1e-8
+    )
+
+    # Use a refined guess for simulated annealing
+    refined_guess = result_local.x
+
+    # Simulated annealing for global optimization
+    def sim_anneal_objective(vars):
+        center_vars = vars[:2 * n].reshape(n, 2)
+        radius_vars = vars[2 * n:]
+        return -np.sum(radius_vars)
+
+    def sim_anneal_constraints(vars):
+        center_vars = vars[:2 * n].reshape(n, 2)
+        radius_vars = vars[2 * n:]
+        non_overlap = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.hypot(center_vars[i][0] - center_vars[j][0],
+                                center_vars[i][1] - center_vars[j][1])
+                non_overlap.append(dist - radius_vars[i] - radius_vars[j])
+        boundary = []
+        for i in range(n):
+            x, y = center_vars[i]
+            r = radius_vars[i]
+            boundary.append(x - r)
+            boundary.append(1 - x - r)
+            boundary.append(y - r)
+            boundary.append(1 - y - r)
+        return np.concatenate([non_overlap, boundary])
+
+    # Simulated annealing parameters
+    temp = 1.0
+    cool_rate = 0.995
+    iters = 2000
+    best_result = refined_guess
+    best_obj = -np.sum(refined_guess[2 * n:])
+
+    for _ in range(iters):
+        # Perturb the guess
+        perturb = np.random.rand(3 * n) * 0.1
+        new_guess = refined_guess + perturb
+        new_guess = np.clip(new_guess, 0, 1)
+
+        # Evaluate
+        cons = sim_anneal_constraints(new_guess)
+        if np.all(cons >= -1e-8):
+            obj = sim_anneal_objective(new_guess)
+            if obj < best_obj:
+                best_obj = obj
+                best_result = new_guess
+                temp *= cool_rate
+
+    # Final optimization with tighter tolerances
+    result = opt.minimize(
+        fun=objective,
+        x0=best_result,
+        method='SLSQP',
+        bounds=bounds,
+        constraints={'type': 'ineq', 'fun': constraints},
+        tol=1e-10
+    )
+
+    # Extract final centers and radii
+    best_centers = result.x[:2 * n].reshape(n, 2)
+    best_radii = result.x[2 * n:]
+    sum_radii = np.sum(best_radii)
+
+    # Validate the packing
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        raise ValueError(msg)
+
+    return best_centers, best_radii, sum_radii
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.hypot(centers[i][0] - centers[j][0],
+                            centers[i][1] - centers[j][1])
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```
