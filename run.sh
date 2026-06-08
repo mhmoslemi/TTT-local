@@ -1,5 +1,5 @@
 # # python train.py --num-circles 10 --target 1.6294 \
-# CUDA_VISIBLE_DEVICES=5 python train.py --num-circles 2 \
+     python train.py --num-circles 2 \
 #                 --num-steps 5 \
 #                 --groups-per-step 2 \
 #                 --group-size 2 \

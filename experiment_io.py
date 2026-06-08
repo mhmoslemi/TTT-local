@@ -10,8 +10,8 @@ Filenames:
     step03_group2_rollout17.meta.json  ← reward, valid, msg, beta, advantage, etc.
 
 Directory name (problem-agnostic):
-    runs/erdos_steps50_g8x64_lr4e-05_T1.0_klc0.1_model-openai_gpt-oss-120b_20260602-220145/
-    runs/circle_packing_n26_target2.6360_steps50_g8x64_..._20260527-220145/
+    runs/erdos_gpt-oss-120b_0602-2201/
+    runs/circle_packing_n26_Qwen3-8B_0527-2201/
 
 A config.json is also dumped at the root of the run dir.
 """
@@ -28,43 +28,27 @@ def _slugify(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._\-]", "_", str(s)).strip("_")
 
 
+def _model_short(model_name: str) -> str:
+    """Return just the last path component of a model name, slugified."""
+    return _slugify(model_name.split("/")[-1])
+
+
 def make_experiment_dir(cfg, root: str = "runs") -> Path:
     """
-    Build a directory whose name encodes the main hyperparams of this run.
-    Creates it and returns the Path.
-
-    Works for every problem: it leads with the problem name and only appends
-    circle-packing's num_circles/target when those attributes are present.
+    Build a directory whose name encodes the key identifiers of this run.
+    Full hyperparameters are always in config.json inside the directory.
     """
-    model_slug = _slugify(cfg.model_name)
     problem = _slugify(getattr(cfg, "problem", "run"))
-
     name_parts = [problem]
 
-    # Circle-packing-specific tags, included only when present (back-compat).
+    # n<circles> tag for circle-packing problems
     num_circles = getattr(cfg, "num_circles", None)
-    target = getattr(cfg, "target", None)
     if problem in ("circle_packing", "circle", "circles") and num_circles is not None:
         name_parts.append(f"n{num_circles}")
-    if target is not None:
-        try:
-            name_parts.append(f"target{float(target):.4f}")
-        except (TypeError, ValueError):
-            pass
-
-    # A problem_type tag for the multi-mode problems (ac1/ac2, trimul/mla...).
-    ptype = getattr(cfg, "problem_type", None)
-    if ptype:
-        name_parts.append(_slugify(ptype))
 
     name_parts += [
-        f"steps{cfg.num_steps}",
-        f"g{cfg.groups_per_step}x{cfg.group_size}",
-        f"lr{cfg.learning_rate:.0e}",
-        f"T{cfg.temperature:.1f}",
-        f"klc{cfg.kl_penalty_coef:g}",
-        f"model-{model_slug}",
-        time.strftime("%Y%m%d-%H%M%S"),
+        _model_short(cfg.model_name),
+        time.strftime("%m%d-%H%M"),
     ]
     name = "_".join(name_parts)
     path = Path(root) / name
@@ -94,8 +78,10 @@ def save_rollout(
     meta should include at least: reward, valid, parsed, ran, msg.
     Anything JSON-serializable is fine.
     """
+    step_dir = Path(exp_dir) / f"step{step:02d}"
+    step_dir.mkdir(exist_ok=True)
     base = f"step{step:02d}_group{group:02d}_rollout{rollout:03d}"
-    (exp_dir / f"{base}.txt").write_text(response_text, errors="replace")
+    (step_dir / f"{base}.txt").write_text(response_text, errors="replace")
 
     # Make sure we can dump everything (numpy floats, bools, etc.)
     def _coerce(v):
@@ -114,12 +100,14 @@ def save_rollout(
         return str(v)
 
     safe_meta = {k: _coerce(v) for k, v in meta.items()}
-    (exp_dir / f"{base}.meta.json").write_text(json.dumps(safe_meta, indent=2))
+    (step_dir / f"{base}.meta.json").write_text(json.dumps(safe_meta, indent=2))
 
 
 def save_step_summary(exp_dir: Path, step: int, summary: dict):
     """Write a per-step summary (group stats, best so far, timings)."""
-    (exp_dir / f"step{step:02d}.summary.json").write_text(
+    step_dir = Path(exp_dir) / f"step{step:02d}"
+    step_dir.mkdir(exist_ok=True)
+    (step_dir / f"step{step:02d}.summary.json").write_text(
         json.dumps(summary, indent=2, default=str)
     )
 
