@@ -1,4 +1,4 @@
-# TTT-Discover — Local 
+<!-- # TTT-Discover — Local 
 
 
 
@@ -120,4 +120,4 @@ python train.py --backend hf
 | `prompts.py` | Chat-format prompt builder |
 | `sandbox.py` | Subprocess code execution with timeout (no Ray) |
 | `experiment_io.py` | Per-run directory creation and rollout logging |
-
+ -->
