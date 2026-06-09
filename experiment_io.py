@@ -124,6 +124,46 @@ def save_final_summary(exp_dir: Path, best_value, best_code, best_step):
         (exp_dir / "best_code.py").write_text(best_code)
 
 
+
+def save_elo_match(exp_dir: Path, step: int, cycle: int, match_idx: int,
+                   meta: dict, prompt_text: str = "", response_text: str = ""):
+    """Save one Elo tournament match under step{step}_Elo/.
+
+    Mirrors save_rollout's layout: a .meta.json plus the raw judge response,
+    and (optionally) the exact prompt the judge saw. `meta` should include the
+    two state ids, which was shown as 1 vs 2, the parsed verdict, and the winner.
+    """
+    elo_dir = Path(exp_dir) / f"step{step:02d}_Elo"
+    elo_dir.mkdir(parents=True, exist_ok=True)
+    base = f"step{step:02d}_cycle{cycle:03d}_match{match_idx:04d}"
+
+    def _coerce(v):
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        if hasattr(v, "item"):
+            try:
+                return v.item()
+            except Exception:
+                return str(v)
+        return str(v)
+
+    safe_meta = {k: _coerce(v) for k, v in meta.items()}
+    (elo_dir / f"{base}.meta.json").write_text(json.dumps(safe_meta, indent=2))
+    (elo_dir / f"{base}.response.txt").write_text(response_text or "", errors="replace")
+    if prompt_text:
+        (elo_dir / f"{base}.prompt.txt").write_text(prompt_text, errors="replace")
+
+
+def save_elo_cycle_summary(exp_dir: Path, step: int, cycle: int, summary: dict):
+    """Write per-cycle Elo standings (ratings, win counts) for quick inspection."""
+    elo_dir = Path(exp_dir) / f"step{step:02d}_Elo"
+    elo_dir.mkdir(parents=True, exist_ok=True)
+    (elo_dir / f"step{step:02d}_cycle{cycle:03d}.summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+
+
+
 if __name__ == "__main__":
     # Self-test
     from types import SimpleNamespace
@@ -142,3 +182,6 @@ if __name__ == "__main__":
     print("Saved demo rollout. Contents:")
     for f in sorted(p.iterdir()):
         print(" ", f.name)
+
+
+

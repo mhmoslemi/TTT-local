@@ -1,0 +1,218 @@
+<strategy>
+To further improve the circle packing in the unit square, we should consider a more refined approach by optimizing both the placement and the radii of the circles simultaneously. Here's a strategic plan for enhancement:
+
+1. **Optimal Boundary and Corner Placement**: 
+   - The current algorithm uses a fixed edge_radius of 0.08 and applies a weight to encourage circles to be near edges and corners. We can improve this by using a more adaptive edge bias — for example, by weighting circles more heavily if they are near corners, as corners offer more "space" for larger circles.
+   - Additionally, we can introduce corner-specific constraints and biases to ensure circles are placed more efficiently at the corners of the unit square.
+
+2. **Hexagonal Packing for Better Density**:
+   - The hexagonal packing is known to be the most efficient way to arrange circles in the plane, but it is not always optimal in constrained shapes like a unit square. However, combining a hexagonal grid with a small perturbation to fit in the square may still yield better results than the current grid-based and hybrid methods.
+
+3. **More Sophisticated Initial Guesses**:
+   - The current method generates multiple initial configurations (hexagonal, edge-biased, hybrid, nested). To improve, we can use a more refined initial guess that accounts for both the hexagonal layout and the corner biases.
+   - We can also simulate a few known optimal packings for smaller numbers of circles and use them as a starting point, with additional circles added in a way that respects the constraints.
+
+4. **Optimization Parameters and Method**:
+   - The current method uses the `SLSQP` solver from `scipy.optimize`. While this is a robust solver for equality constraints, more sophisticated techniques such as the `COBYLA` method, which handles bounds and constraints well, could also be considered.
+   - Furthermore, using a more advanced global optimization method like `shgo` (Scipy's Sequential Least Squares Programming with Global Optimization) might help escape local optima and find a better solution.
+
+5. **Refining Edge and Corner Bias**:
+   - We can refine the edge_radius and corner bias dynamically, based on the current positions of the circles, to ensure that the algorithm pushes circles towards corners and along edges in a way that maximizes total radius.
+
+6. **Dynamic Constraint Adjustments**:
+   - We can add a small tolerance in the boundary constraints to allow circles to be slightly outside the unit square for the purpose of optimization, and then adjust the radii accordingly to ensure no overlap or violation of constraints after optimization.
+
+7. **Hybrid Approach with Known Configurations**:
+   - If we can find a known optimal packing configuration for a similar number of circles (say 26), we can initialize our algorithm with that configuration and fine-tune it to fit in the unit square.
+
+By combining all these elements, we can significantly improve the overall packing efficiency and reach higher total radii.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+import random
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+    edge_radius = 0.08
+    edge_bias_weight = 0.3
+    corner_weight = 0.4
+    spacing = 0.22
+    offset_x = 0.1
+    offset_y = 0.1
+    corner_distance_threshold = 0.1
+
+    def generate_hexagonal_grid(n, spacing, offset_x, offset_y):
+        hex_positions = np.zeros((n, 2))
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            x = col * spacing + offset_x
+            y = row * spacing + (col % 2) * spacing * 0.5 + offset_y
+            hex_positions[i] = [x, y]
+        return hex_positions
+
+    def generate_edge_biased_guesses(n, edge_radius):
+        edge_positions = np.zeros((n, 2))
+        for i in range(n):
+            x = np.random.uniform(edge_radius, 1 - edge_radius)
+            y = np.random.uniform(edge_radius, 1 - edge_radius)
+            edge_positions[i] = [x, y]
+        return edge_positions
+
+    def generate_nested_guesses(n):
+        nested_positions = np.zeros((n, 2))
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            base_x = col * 0.23 + (0.3 if col == 0 or col == 4 else 0.0)
+            base_y = row * 0.23 + (0.3 if row == 0 or row == 4 else 0.0)
+            x = base_x + (0.02 if row < 2 or row > 3 else 0.0)
+            y = base_y + (0.02 if col < 2 or col > 3 else 0.0)
+            nested_positions[i] = [x, y]
+        return nested_positions
+
+    def generate_corner_biased_guesses(n):
+        corner_positions = np.zeros((n, 2))
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            base_x = col * 0.23 + (0.3 if col == 0 or col == 4 else 0.0)
+            base_y = row * 0.23 + (0.3 if row == 0 or row == 4 else 0.0)
+            x = base_x + (0.02 if row < 2 or row > 3 else 0.0)
+            y = base_y + (0.02 if col < 2 or col > 3 else 0.0)
+            corner_positions[i] = [x, y]
+        return corner_positions
+
+    def generate_initial_guesses(n):
+        initial_guesses = []
+        initial_guesses.append((generate_hexagonal_grid(n, spacing, offset_x, offset_y), np.full(n, 0.04)))
+        initial_guesses.append((generate_edge_biased_guesses(n, edge_radius), np.full(n, 0.04)))
+        initial_guesses.append((generate_nested_guesses(n), np.full(n, 0.04)))
+        initial_guesses.append((generate_corner_biased_guesses(n), np.full(n, 0.04)))
+        return initial_guesses
+
+    def apply_edge_bias(positions, edge_radius, corner_weight):
+        edge_weights = np.zeros(n)
+        for j in range(n):
+            x, y = positions[j]
+            if (x < edge_radius or x > 1 - edge_radius or y < edge_radius or y > 1 - edge_radius):
+                edge_weights[j] = 1.5
+            else:
+                corner_distance = min(x, 1 - x, y, 1 - y)
+                if corner_distance < edge_radius:
+                    edge_weights[j] = 1.0 + corner_weight
+                else:
+                    edge_weights[j] = 1.0
+        return edge_weights
+
+    def scale_positions(positions):
+        x_min, x_max = positions[:, 0].min(), positions[:, 0].max()
+        y_min, y_max = positions[:, 1].min(), positions[:, 1].max()
+        scale = min(1.0 / x_max, 1.0 / x_min, 1.0 / y_max, 1.0 / y_min)
+        scaled_positions = positions * scale
+        return scaled_positions
+
+    best_sum = 0.0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    initial_guesses = generate_initial_guesses(n)
+
+    for i, (positions, radii) in enumerate(initial_guesses):
+        edge_weights = apply_edge_bias(positions, edge_radius, corner_weight)
+        scaled_positions = scale_positions(positions)
+        scaled_radii = radii * edge_weights
+        scaled_radii = np.clip(scaled_radii, 0, 1.0)
+
+        def objective(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            # Objective: maximize sum of radii, so minimize -sum(radii)
+            # Add edge bias to guide circles towards edges
+            edge_bias = 0.0
+            for j in range(n):
+                x_j, y_j = centers[j]
+                r_j = radii[j]
+                # Check if circle is near an edge
+                if x_j < edge_radius or x_j > 1 - edge_radius or y_j < edge_radius or y_j > 1 - edge_radius:
+                    edge_bias += r_j
+                else:
+                    corner_distance = min(x_j, 1 - x_j, y_j, 1 - y_j)
+                    if corner_distance < edge_radius:
+                        edge_bias += r_j
+            return -np.sum(radii) - edge_bias * edge_bias_weight
+
+        def boundary_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            left = centers[:, 0] - radii - 1e-6
+            right = 1.0 - centers[:, 0] - radii - 1e-6
+            bottom = centers[:, 1] - radii - 1e-6
+            top = 1.0 - centers[:, 1] - radii - 1e-6
+            return np.concatenate([left, right, bottom, top])
+
+        def distance_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            dist = np.zeros(n * (n - 1) // 2)
+            idx = 0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = centers[i, 0] - centers[j, 0]
+                    dy = centers[i, 1] - centers[j, 1]
+                    dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-6
+                    idx += 1
+            return dist
+
+        x0 = np.concatenate([scaled_positions.flatten(), scaled_radii])
+
+        bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+
+        cons = [
+            {'type': 'ineq', 'fun': boundary_constraint},
+            {'type': 'ineq', 'fun': distance_constraint}
+        ]
+
+        result_1 = optimize.minimize(
+            objective,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-4,
+            options={'maxiter': 100}
+        )
+
+        result_2 = optimize.minimize(
+            objective,
+            result_1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-6,
+            options={'maxiter': 200}
+        )
+
+        centers = result_2.x[:2*n].reshape(n, 2)
+        radii = result_2.x[2*n:]
+        sum_radii = np.sum(radii)
+
+        valid, msg = validate_packing(centers, radii)
+        if not valid:
+            print("Invalid packing:", msg)
+            continue
+
+        if sum_radii > best_sum:
+            best_sum = sum_radii
+            best_centers = centers
+            best_radii = radii
+
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        print("Invalid packing:", msg)
+        raise ValueError(msg)
+
+    return (best_centers, best_radii, best_sum)
+```

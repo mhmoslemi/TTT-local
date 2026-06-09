@@ -1,0 +1,169 @@
+<strategy>
+To improve the packing of 26 circles in a unit square, we should consider a more sophisticated and adaptive strategy. While the initial hexagonal grid is a good starting point, it likely leaves suboptimal spacing in regions where circles can be packed more densely or where boundary effects are more pronounced. Here's a revised strategy:
+
+1. **Optimal Arrangement Strategy**:
+   - Use a **hybrid packing method** that combines hexagonal packing with **local refinements**.
+   - Instead of using a fixed hexagonal grid, **optimize the placement of circles** iteratively using a **gradient-based optimization technique** such as **projected gradient descent** or **sequential quadratic programming** (SQP) with constraints.
+   - The key idea is to **iteratively adjust circle positions and radii** while ensuring that each circle stays within the unit square and doesn't overlap with any others.
+
+2. **Dynamic Initialization**:
+   - Instead of a single static hexagonal grid, create multiple **initial configurations** with different placements:
+     - A hexagonal grid for bulk packing
+     - A random scatter for diversity
+     - Circles placed near the boundaries and corners (which are often underutilized)
+   - These configurations will be used as **starting points for the optimization process**, leading to better global optima.
+
+3. **Optimization Strategy**:
+   - Use **projected gradient descent** or a **more robust constrained optimization** method like **SLSQP** (as before) to maximize the total sum of radii.
+   - **Refine the radius constraints** using tighter bounds and tighter tolerance.
+   - Implement **stochastic local search** for further refinement if needed.
+
+4. **Boundary and Corner Utilization**:
+   - Ensure that corners are fully utilized by placing circles at strategic spots close to the edges.
+   - Add additional circles in **corner regions** if the initial setup fails to place enough circles there.
+
+5. **Adaptive Optimization**:
+   - Use **multiple passes** of optimization with different starting positions or starting guesses for radii.
+   - Introduce **dynamic bounds** on the radii that adapt as overlaps are resolved.
+
+6. **Final Validation**:
+   - Validate the final packing using the same `validate_packing` function to ensure no overlaps and all circles stay within the unit square.
+   - Use **random restarts** and **perturbed initial configurations** to avoid local optima.
+
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+
+def run_packing():
+    num_circles = 26
+
+    # Generate multiple initial configurations
+    def generate_initial_configurations():
+        configs = []
+        # Hexagonal grid with extra circles in corners
+        rows = int(np.ceil(np.sqrt(num_circles)))
+        cols = int(np.ceil(num_circles / rows))
+        spacing = 1.0 / (cols + 1)
+        centers_hex = np.zeros((num_circles, 2))
+        idx = 0
+        for row in range(rows):
+            for col in range(cols):
+                x = col * spacing + spacing / 2
+                y = row * spacing * np.sqrt(3)/2 + spacing / 2
+                if row % 2 == 1:
+                    x += spacing / 2
+                if idx < num_circles:
+                    centers_hex[idx] = [x, y]
+                    idx += 1
+        # Add extra circles near corners
+        def add_corner_circles(config):
+            corner_positions = [
+                (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),
+                (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)
+            ]
+            for pos in corner_positions:
+                if len(config) < num_circles:
+                    config.append(pos)
+        add_corner_circles(centers_hex)
+        # Shuffle to get randomized starting positions
+        np.random.shuffle(centers_hex)
+        configs.append(centers_hex)
+
+        # Random scatter configuration
+        centers_rand = np.random.rand(num_circles, 2)
+        centers_rand = np.clip(centers_rand, 0.05, 0.95)
+        configs.append(centers_rand)
+
+        return configs
+
+    initial_centers = generate_initial_configurations()
+    best_centers = initial_centers[0]
+    best_radii = np.ones(num_circles) * 0.05
+    best_sum = 0.0
+
+    # Optimization parameters
+    radius_bounds = [(0, 1.0) for _ in range(num_circles)]
+    for centers in initial_centers:
+        # Objective function: maximize sum of radii
+        def objective_function(radii_params):
+            return -np.sum(radii_params)  # Minimize negative sum
+
+        # Constraint function for circles not overlapping
+        def constraint_overlap(i, j, centers, radii_params):
+            x1, y1 = centers[i]
+            x2, y2 = centers[j]
+            r1 = radii_params[i]
+            r2 = radii_params[j]
+            dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+            return dist - (r1 + r2)
+
+        # Constraint function for circles within the unit square
+        def constraint_boundary(i, centers, radii_params):
+            x, y = centers[i]
+            r = radii_params[i]
+            return (x - r) + 1e-12  # Ensure circle doesn't go out of bounds on the left
+        def constraint_boundary_right(i, centers, radii_params):
+            x, y = centers[i]
+            r = radii_params[i]
+            return (1.0 - x - r) + 1e-12  # Ensure circle doesn't go out of bounds on the right
+        def constraint_boundary_top(i, centers, radii_params):
+            x, y = centers[i]
+            r = radii_params[i]
+            return (1.0 - y - r) + 1e-12  # Ensure circle doesn't go out of bounds on the top
+        def constraint_boundary_bottom(i, centers, radii_params):
+            x, y = centers[i]
+            r = radii_params[i]
+            return (y - r) + 1e-12  # Ensure circle doesn't go out of bounds on the bottom
+
+        # Constraints
+        cons = []
+        # Boundary constraints
+        for i in range(num_circles):
+            cons.append({'type': 'ineq', 'fun': lambda x, i=i, centers=centers: constraint_boundary(i, centers, x)})
+            cons.append({'type': 'ineq', 'fun': lambda x, i=i, centers=centers: constraint_boundary_right(i, centers, x)})
+            cons.append({'type': 'ineq', 'fun': lambda x, i=i, centers=centers: constraint_boundary_top(i, centers, x)})
+            cons.append({'type': 'ineq', 'fun': lambda x, i=i, centers=centers: constraint_boundary_bottom(i, centers, x)})
+
+        # Overlap constraints
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                cons.append({'type': 'ineq', 'fun': lambda x, i=i, j=j, centers=centers: constraint_overlap(i, j, centers, x)})
+
+        # Initial guess (radii)
+        initial_guess = np.ones(num_circles) * 0.05
+
+        # Run optimization with SLSQP
+        result = opt.minimize(
+            objective_function,
+            initial_guess,
+            method='SLSQP',
+            bounds=radius_bounds,
+            constraints=cons,
+            tol=1e-8,
+            options={'maxiter': 500, 'ftol': 1e-8, 'eps': 1e-8}
+        )
+
+        # Extract results
+        radii_result = result.x
+        total_sum = np.sum(radii_result)
+
+        # Validate the packing
+        is_valid, message = validate_packing(centers, radii_result)
+        if is_valid:
+            if total_sum > best_sum:
+                best_centers = centers
+                best_radii = radii_result
+                best_sum = total_sum
+
+    # Validate the best configuration
+    is_valid, message = validate_packing(best_centers, best_radii)
+    if not is_valid:
+        print(f"Warning: Best packing is invalid. Reason: {message}")
+        # Fallback to initial guess if invalid
+        best_radii = np.ones(num_circles) * 0.05
+        best_sum = np.sum(best_radii)
+
+    return best_centers, best_radii, best_sum
+```

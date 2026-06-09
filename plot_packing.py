@@ -22,181 +22,366 @@ import numpy.random as npr
 # ====================================================================
 
 import numpy as np
-import scipy.optimize as opt
+import scipy.optimize as optimize
+import random
+
+def generate_hexagonal_positions(n, spacing, offset_x, offset_y):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        x = col * spacing + offset_x
+        y = row * spacing + (col % 2) * spacing * 0.5 + offset_y
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_zigzag_positions(n):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        base_x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+        base_y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+        x = base_x
+        y = base_y + (0.02 if (row + col) % 2 == 1 else 0.0)
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_adaptive_positions(n):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        base_x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+        base_y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+        x = base_x + (0.02 if row < 2 or row > 3 else 0.0)
+        y = base_y + (0.02 if col < 2 or col > 3 else 0.0)
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_random_positions(n):
+    positions = np.random.rand(n, 2)
+    return positions
 
 def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
     n = 26
-    
-    # Initial points based on known optimal configurations and a hexagonal grid
-    # with boundary-aware shifts
-    grid_points = []
-    # Create a hexagonal grid with spacing that adjusts for boundary proximity
-    for i in range(5):
-        for j in range(5):
-            # Shift even rows to allow better circle placement near boundaries
-            x = i / 4.0 + (i % 2) * 0.025
-            y = j / 4.0 + (i % 2) * 0.025
-            grid_points.append((x, y))
-    
-    # Add points near boundaries and corners
-    boundary_points = [
-        (0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9),
-        (0.2, 0.2), (0.2, 0.8), (0.8, 0.2), (0.8, 0.8),
-        (0.15, 0.15), (0.15, 0.85), (0.85, 0.15), (0.85, 0.85),
-        (0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75),
-        (0.05, 0.5), (0.95, 0.5), (0.5, 0.05), (0.5, 0.95),
-        (0.1, 0.5), (0.5, 0.1), (0.9, 0.5), (0.5, 0.9),
-        (0.3, 0.3), (0.3, 0.7), (0.7, 0.3), (0.7, 0.7),
-        (0.2, 0.5), (0.8, 0.5), (0.5, 0.2), (0.5, 0.8),
-        (0.25, 0.5), (0.75, 0.5), (0.5, 0.25), (0.5, 0.75),
-        (0.225, 0.5), (0.775, 0.5), (0.5, 0.225), (0.5, 0.775),
-        (0.23, 0.5), (0.77, 0.5), (0.5, 0.23), (0.5, 0.77),
+    edge_radius = 0.08
+    initial_guesses = [
+        (generate_hexagonal_positions(n, 0.23, 0.1, 0.1), np.full(n, 0.04)),
+        (generate_zigzag_positions(n), np.full(n, 0.04)),
+        (generate_adaptive_positions(n), np.full(n, 0.04)),
+        (generate_random_positions(n), np.full(n, 0.04)),
     ]
-    grid_points += boundary_points
 
-    # Limit the number of centers to 26
-    adjusted_centers = []
-    for x, y in grid_points:
-        x = max(0.05, min(0.95, x))
-        y = max(0.05, min(0.95, y))
-        adjusted_centers.append((x, y))
-    
-    # Limit to 26 unique points
-    adjusted_centers = adjusted_centers[:n]
-    # Remove duplicates
-    adjusted_centers = [tuple(p) for p in np.unique(adjusted_centers, axis=0)]
-    adjusted_centers = adjusted_centers[:n]
-    
-    # Initialize centers
-    centers = np.array(adjusted_centers)
-    
-    # We will use multiple starting layouts to enhance optimization
-    start_centers = []
-    # Generate multiple layout variations
-    for variant in range(3):
-        # Adjust the grid points slightly to allow for different layouts
-        variant_centers = []
-        for i in range(n):
-            x, y = centers[i]
-            if variant == 1:
-                # Shift right and up
-                x += 0.025
-                y += 0.025
-            elif variant == 2:
-                # Shift left and down
-                x -= 0.025
-                y -= 0.025
-            # Ensure within bounds
-            x = max(0.05, min(0.95, x))
-            y = max(0.05, min(0.95, y))
-            variant_centers.append((x, y))
-        start_centers.append(np.array(variant_centers))
-    
-    # Optimization: maximize sum of radii with constraints
-    def objective(vars):
-        # Split the variables into centers and radii
-        center_vars = vars[:2 * n].reshape(n, 2)
-        radius_vars = vars[2 * n:]
-        
-        # Compute the sum of radii
-        return -np.sum(radius_vars)  # minimize negative sum to maximize sum
-    
-    def constraints(vars):
-        # Split the variables into centers and radii
-        center_vars = vars[:2 * n].reshape(n, 2)
-        radius_vars = vars[2 * n:]
-        
-        # Non-overlapping constraints: dist(c_i, c_j) >= r_i + r_j
-        non_overlap_constraints = []
-        for i in range(n):
-            for j in range(i + 1, n):
-                dist = np.hypot(center_vars[i][0] - center_vars[j][0],
-                                center_vars[i][1] - center_vars[j][1])
-                constraint = dist - radius_vars[i] - radius_vars[j]
-                non_overlap_constraints.append(constraint)
-        
-        # Boundary constraints: x - r >= 0, x + r <= 1, same for y
-        boundary_constraints = []
-        for i in range(n):
-            x, y = center_vars[i]
-            r = radius_vars[i]
-            boundary_constraints.append(x - r)
-            boundary_constraints.append(1 - x - r)
-            boundary_constraints.append(y - r)
-            boundary_constraints.append(1 - y - r)
-        
-        return np.concatenate([non_overlap_constraints, boundary_constraints])
-
-    best_sum_radii = 0.0
+    best_sum = 0.0
     best_centers = np.zeros((n, 2))
     best_radii = np.zeros(n)
 
-    for start_idx in range(len(start_centers)):
-        initial_guess = np.concatenate([
-            start_centers[start_idx].reshape(n * 2),
-            np.full(n, 0.15)  # Start with a moderate radius
-        ])
+    for i, (positions, radii) in enumerate(initial_guesses):
+        # Scale the initial positions and radii to fit in the unit square
+        scale = min(1.0 / positions.max(), 1.0 / positions.min())
+        scaled_positions = positions * scale
+        scaled_radii = radii * scale
 
-        # Optimization bounds: center coordinates in [0,1], radii >= 0
-        bounds = []
-        for i in range(n):
-            # Center coordinates
-            bounds.append((0, 1))
-            bounds.append((0, 1))
-            # Radius
-            bounds.append((0, 1))
+        # Add weighting to circles near edges and corners to encourage optimal packing
+        edge_weights = np.zeros(n)
+        corner_weights = np.zeros(n)
+        for j in range(n):
+            x, y = scaled_positions[j]
+            if x < edge_radius or x > 1 - edge_radius or y < edge_radius or y > 1 - edge_radius:
+                edge_weights[j] = 1.5
+            if (x < edge_radius and y < edge_radius) or (x < edge_radius and y > 1 - edge_radius) or \
+               (x > 1 - edge_radius and y < edge_radius) or (x > 1 - edge_radius and y > 1 - edge_radius):
+                corner_weights[j] = 1.8
 
-        # Use SLSQP with tighter tolerances for better convergence
-        result = opt.minimize(
-            fun=objective,
-            x0=initial_guess,
-            method='SLSQP',
+        scaled_radii *= edge_weights * corner_weights
+        scaled_radii = np.clip(scaled_radii, 0, 1.0)
+
+        def objective(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            edge_bias = 0.0
+            for j in range(n):
+                x_j, y_j = centers[j]
+                r_j = radii[j]
+                if x_j < edge_radius or x_j > 1 - edge_radius or y_j < edge_radius or y_j > 1 - edge_radius:
+                    edge_bias += r_j
+            return -np.sum(radii) - edge_bias * 0.2
+
+        def boundary_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            left = centers[:, 0] - radii - 1e-10
+            right = 1.0 - centers[:, 0] - radii - 1e-10
+            bottom = centers[:, 1] - radii - 1e-10
+            top = 1.0 - centers[:, 1] - radii - 1e-10
+            return np.concatenate([left, right, bottom, top])
+
+        def distance_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            dist = np.zeros(n * (n - 1) // 2)
+            idx = 0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = centers[i, 0] - centers[j, 0]
+                    dy = centers[i, 1] - centers[j, 1]
+                    dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-10
+                    idx += 1
+            return dist
+
+        x0 = np.concatenate([scaled_positions.flatten(), scaled_radii])
+        bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+        cons = [
+            {'type': 'ineq', 'fun': boundary_constraint},
+            {'type': 'ineq', 'fun': distance_constraint}
+        ]
+
+        result_1 = optimize.minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
             bounds=bounds,
-            constraints={'type': 'ineq', 'fun': constraints},
-            tol=1e-12,
-            options={'maxiter': 1000, 'ftol': 1e-12, 'eps': 1e-12}
+            constraints=cons,
+            tol=1e-4,
+            options={'maxiter': 300}
         )
 
-        # Extract final centers and radii
-        current_centers = result.x[:2 * n].reshape(n, 2)
-        current_radii = result.x[2 * n:]
-        current_sum_radii = np.sum(current_radii)
+        result_2 = optimize.minimize(
+            objective,
+            result_1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-6,
+            options={'maxiter': 500}
+        )
 
-        # Validate the packing
-        valid, msg = validate_packing(current_centers, current_radii)
-        if valid and current_sum_radii > best_sum_radii:
-            best_sum_radii = current_sum_radii
-            best_centers = current_centers
-            best_radii = current_radii
+        centers = result_2.x[:2*n].reshape(n, 2)
+        radii = result_2.x[2*n:]
+        sum_radii = np.sum(radii)
 
-    return best_centers, best_radii, best_sum_radii
+        valid, msg = validate_packing(centers, radii)
+        if not valid:
+            print("Invalid packing:", msg)
+            continue
 
-def validate_packing(centers, radii):
-    n = centers.shape[0]
+        if sum_radii > best_sum:
+            best_sum = sum_radii
+            best_centers = centers
+            best_radii = radii
 
-    if np.isnan(centers).any() or np.isnan(radii).any():
-        return False, "NaN values present"
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        print("Invalid packing:", msg)
+        raise ValueError(msg)
 
-    for i in range(n):
-        if radii[i] < 0:
-            return False, f"Circle {i} has negative radius {radii[i]}"
+    return (best_centers, best_radii, best_sum)
 
-    for i in range(n):
-        x, y = centers[i]
-        r = radii[i]
-        if (x - r < -1e-12 or x + r > 1 + 1e-12
-                or y - r < -1e-12 or y + r > 1 + 1e-12):
-            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+# import numpy as np
+# import scipy.optimize as optimize
+# import random
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            dist = np.hypot(centers[i][0] - centers[j][0],
-                            centers[i][1] - centers[j][1])
-            if dist < radii[i] + radii[j] - 1e-12:
-                return False, f"Circles {i} and {j} overlap"
+# def generate_hexagonal_positions(n, spacing, offset_x, offset_y):
+#     positions = []
+#     for i in range(n):
+#         row = i // 5
+#         col = i % 5
+#         x = col * spacing + offset_x
+#         y = row * spacing + (col % 2) * spacing * 0.5 + offset_y
+#         positions.append([x, y])
+#     return np.array(positions)
 
-    return True, "ok"
+# def generate_nested_positions(n, spacing, offset_x, offset_y):
+#     positions = []
+#     for i in range(n):
+#         level = i // 5
+#         offset = i % 5
+#         x = offset * spacing + offset_x
+#         y = level * spacing + offset_y
+#         positions.append([x, y])
+#     return np.array(positions)
 
+# def generate_random_positions(n):
+#     positions = np.random.rand(n, 2)
+#     return positions
+
+# def generate_corner_positions(n):
+#     positions = []
+#     for i in range(n):
+#         row = i // 5
+#         col = i % 5
+#         x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+#         y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+#         positions.append([x, y])
+#     return np.array(positions)
+
+# def generate_hybrid_positions(n):
+#     positions = []
+#     for i in range(n):
+#         row = i // 5
+#         col = i % 5
+#         base_x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+#         base_y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+#         x = base_x + (0.02 if row < 2 or row > 3 else 0.0)
+#         y = base_y + (0.02 if col < 2 or col > 3 else 0.0)
+#         positions.append([x, y])
+#     return np.array(positions)
+
+# def generate_zigzag_positions(n):
+#     positions = []
+#     for i in range(n):
+#         row = i // 5
+#         col = i % 5
+#         base_x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+#         base_y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+#         x = base_x
+#         y = base_y + (0.02 if (row + col) % 2 == 1 else 0.0)
+#         positions.append([x, y])
+#     return np.array(positions)
+
+# def generate_corner_aligned_positions(n):
+#     positions = []
+#     for i in range(n):
+#         row = i // 5
+#         col = i % 5
+#         x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+#         y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+#         positions.append([x, y])
+#     return np.array(positions)
+
+# def generate_spiral_positions(n):
+#     positions = []
+#     for i in range(n):
+#         angle = 2 * np.pi * i / n
+#         radius = 0.2 + 0.1 * (i % 5)
+#         x = 0.5 + radius * np.cos(angle)
+#         y = 0.5 + radius * np.sin(angle)
+#         positions.append([x, y])
+#     return np.array(positions)
+
+# def generate_radial_positions(n):
+#     positions = []
+#     for i in range(n):
+#         angle = 2 * np.pi * i / n
+#         radius = 0.2 + 0.1 * (i % 5)
+#         x = 0.5 + radius * np.cos(angle)
+#         y = 0.5 + radius * np.sin(angle)
+#         positions.append([x, y])
+#     return np.array(positions)
+
+# def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+#     n = 26
+#     edge_radius = 0.08
+#     num_iterations = 5
+
+#     def objective(x):
+#         centers = x[:2*n].reshape(n, 2)
+#         radii = x[2*n:]
+#         edge_bias = 0.0
+#         for j in range(n):
+#             x_j, y_j = centers[j]
+#             r_j = radii[j]
+#             if x_j < edge_radius or x_j > 1 - edge_radius or y_j < edge_radius or y_j > 1 - edge_radius:
+#                 edge_bias += r_j
+#         return -np.sum(radii) - edge_bias * 0.2
+
+#     def boundary_constraint(x):
+#         centers = x[:2*n].reshape(n, 2)
+#         radii = x[2*n:]
+#         left = centers[:, 0] - radii - 1e-8
+#         right = 1.0 - centers[:, 0] - radii - 1e-8
+#         bottom = centers[:, 1] - radii - 1e-8
+#         top = 1.0 - centers[:, 1] - radii - 1e-8
+#         return np.concatenate([left, right, bottom, top])
+
+#     def distance_constraint(x):
+#         centers = x[:2*n].reshape(n, 2)
+#         radii = x[2*n:]
+#         dist = np.zeros(n * (n - 1) // 2)
+#         idx = 0
+#         for i in range(n):
+#             for j in range(i + 1, n):
+#                 dx = centers[i, 0] - centers[j, 0]
+#                 dy = centers[i, 1] - centers[j, 1]
+#                 dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-8
+#                 idx += 1
+#         return dist
+
+#     initial_guesses = [
+#         (generate_hexagonal_positions(n, 0.25, 0.1, 0.1), np.full(n, 0.04)),
+#         (generate_nested_positions(n, 0.25, 0.1, 0.1), np.full(n, 0.04)),
+#         (generate_random_positions(n), np.full(n, 0.04)),
+#         (generate_hybrid_positions(n), np.full(n, 0.04)),
+#         (generate_corner_positions(n), np.full(n, 0.04)),
+#         (generate_zigzag_positions(n), np.full(n, 0.04)),
+#         (generate_corner_aligned_positions(n), np.full(n, 0.04)),
+#         (generate_spiral_positions(n), np.full(n, 0.04)),
+#         (generate_radial_positions(n), np.full(n, 0.04)),
+#     ]
+
+#     best_sum = 0.0
+#     best_centers = np.zeros((n, 2))
+#     best_radii = np.zeros(n)
+
+#     for i, (positions, radii) in enumerate(initial_guesses):
+#         scale = min(1.0 / positions.max(), 1.0 / positions.min())
+#         scaled_positions = positions * scale
+#         scaled_radii = radii * scale
+
+#         edge_weights = np.zeros(n)
+#         for j in range(n):
+#             x_j, y_j = scaled_positions[j]
+#             if x_j < edge_radius or x_j > 1 - edge_radius or y_j < edge_radius or y_j > 1 - edge_radius:
+#                 edge_weights[j] = 1.5 + 1.5 * (1 - np.min([x_j, 1 - x_j, y_j, 1 - y_j]) / edge_radius)
+#         scaled_radii *= edge_weights
+#         scaled_radii = np.clip(scaled_radii, 0, 1.0)
+
+#         x0 = np.concatenate([scaled_positions.flatten(), scaled_radii])
+#         bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+#         cons = [
+#             {'type': 'ineq', 'fun': boundary_constraint},
+#             {'type': 'ineq', 'fun': distance_constraint}
+#         ]
+
+#         result_1 = optimize.minimize(
+#             objective,
+#             x0,
+#             method='L-BFGS-B',
+#             bounds=bounds,
+#             constraints=cons,
+#             tol=1e-4
+#         )
+
+#         result_2 = optimize.minimize(
+#             objective,
+#             result_1.x,
+#             method='SLSQP',
+#             bounds=bounds,
+#             constraints=cons,
+#             tol=1e-6
+#         )
+
+#         centers = result_2.x[:2*n].reshape(n, 2)
+#         radii = result_2.x[2*n:]
+#         sum_radii = np.sum(radii)
+
+#         valid, msg = validate_packing(centers, radii)
+#         if not valid:
+#             print("Invalid packing:", msg)
+#             continue
+
+#         if sum_radii > best_sum:
+#             best_sum = sum_radii
+#             best_centers = centers
+#             best_radii = radii
+
+#     valid, msg = validate_packing(best_centers, best_radii)
+#     if not valid:
+#         print("Invalid packing:", msg)
+#         raise ValueError(msg)
+
+#     return (best_centers, best_radii, best_sum)
 # ====================================================================
 # Validation (same as reward.py)
 # ====================================================================
@@ -288,7 +473,7 @@ def plot_packing(centers, radii, sum_radii, save_to=None):
     ax.set_yticks([0, 0.25, 0.5, 0.75, 1])
     ax.grid(True, alpha=0.3)
 
-    title = f"n={n}  sum of radii = {sum_radii:.6f}"
+    title = f"n={n}  sum of radii = {sum_radii:.10f}, SOTA = 2.635983"
     if issues:
         title += f"  [INVALID: {len(issues)} issue(s)]"
     ax.set_title(title, fontsize=12)

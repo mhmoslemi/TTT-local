@@ -1,0 +1,237 @@
+<strategy>
+To further improve the circle packing in a unit square, we need a more refined and adaptive approach, taking into account the following key principles:
+
+1. **Boundary Utilization**:
+   - Current methods place circles near edges and corners with fixed spacing. We should allow for more adaptive growth of radii near boundaries to maximize space usage.
+   - Adding a boundary-aware penalty could help encourage better placement near the edges and corners.
+
+2. **Optimal Arrangements**:
+   - Hexagonal packing is typically the most efficient, but for constrained numbers (like 26), it's not straightforward to apply directly. A hybrid approach combining hexagonal and grid layouts could be beneficial.
+   - A nested or clustered approach may also help, especially to fill space where gaps occur.
+
+3. **Gap Detection and Filling**:
+   - The optimization process should be augmented with a method to detect areas with potential for additional packing. A local refinement phase could be added to adjust positions and radii of smaller circles in less densely packed regions.
+
+4. **Optimization Parameters and Methods**:
+   - The current setup uses a fixed set of initial layouts. A better approach would be to use more diverse and adaptive initial configurations based on known packing strategies.
+   - Optimization should be made more robust with a combination of global and local search methods, such as using Differential Evolution (DE) in the initial phase and then moving to more refined SLSQP optimization.
+
+5. **Adaptive Constraints**:
+   - Instead of a fixed edge radius (like 0.08), a dynamic constraint that depends on the current state of the packing could lead to better results.
+
+6. **Parallel Exploration**:
+   - To explore multiple initial configuration strategies in parallel, reducing dependency on a single configuration and increasing chances of finding the global maximum.
+
+By implementing these ideas in the code, we should improve both the efficiency and performance of the optimization process, resulting in a better sum of radii. We will:
+- Use more diverse and adaptive initial configurations.
+- Apply boundary-aware penalties.
+- Add local refinement phases.
+- Use a combination of global and local optimization methods.
+- Implement dynamic constraints.
+- Add a post-optimization refinement step to fill gaps.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+
+    def generate_corner_positions(n):
+        positions = []
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            x = col * 0.2 + (0.25 if col == 0 or col == 4 else 0.0)
+            y = row * 0.2 + (0.25 if row == 0 or row == 4 else 0.0)
+            positions.append([x, y])
+        return np.array(positions)
+
+    def generate_hexagonal_positions(n, spacing, offset_x, offset_y):
+        positions = []
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            x = col * spacing + offset_x
+            y = row * spacing + (col % 2) * spacing * 0.5 + offset_y
+            positions.append([x, y])
+        return np.array(positions)
+
+    def generate_initial_guesses(n):
+        positions = []
+        radii = []
+
+        # Corner-based positions
+        corner_positions = generate_corner_positions(n)
+        positions.append(corner_positions)
+        radii.append(np.full(n, 0.05))
+
+        # Hexagonal grid with adjusted spacing
+        hex_positions = generate_hexagonal_positions(n, 0.22, 0.1, 0.1)
+        positions.append(hex_positions)
+        radii.append(np.full(n, 0.05))
+
+        # Grid-based positions with edge bias
+        grid_positions = []
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            x = col * 0.2 + (0.25 if col == 0 or col == 4 else 0.0)
+            y = row * 0.2 + (0.25 if row == 0 or row == 4 else 0.0)
+            grid_positions.append([x, y])
+        positions.append(np.array(grid_positions))
+        radii.append(np.full(n, 0.05))
+
+        # Random positions with edge bias
+        random_positions = np.random.rand(n, 2)
+        edge_weights = np.zeros(n)
+        for j in range(n):
+            x, y = random_positions[j]
+            if x < 0.08 or x > 1 - 0.08 or y < 0.08 or y > 1 - 0.08:
+                edge_weights[j] = 1.5
+        positions.append(random_positions)
+        radii.append(np.full(n, 0.05) * edge_weights)
+
+        # Combined corner and grid positions with edge growth
+        combined_positions = []
+        for i in range(n):
+            row = i // 5
+            col = i % 5
+            x = col * 0.2 + (0.25 if col == 0 or col == 4 else 0.0)
+            y = row * 0.2 + (0.25 if row == 0 or row == 4 else 0.0)
+            combined_positions.append([x, y])
+        positions.append(np.array(combined_positions))
+        radii.append(np.full(n, 0.05))
+
+        return positions, radii
+
+    def objective(x, n, edge_radius=0.08):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        edge_bias = 0.0
+        for j in range(n):
+            x_j, y_j = centers[j]
+            r_j = radii[j]
+            if (x_j < edge_radius or x_j > 1 - edge_radius or
+                y_j < edge_radius or y_j > 1 - edge_radius):
+                edge_bias += r_j
+        return -np.sum(radii) - edge_bias * 0.2
+
+    def boundary_constraint(x, n, edge_radius=0.08):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        left = centers[:, 0] - radii - 1e-6
+        right = 1.0 - centers[:, 0] - radii - 1e-6
+        bottom = centers[:, 1] - radii - 1e-6
+        top = 1.0 - centers[:, 1] - radii - 1e-6
+        return np.concatenate([left, right, bottom, top])
+
+    def distance_constraint(x, n):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        dist = np.zeros(n * (n - 1) // 2)
+        idx = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-6
+                idx += 1
+        return dist
+
+    positions, radii = generate_initial_guesses(n)
+    best_sum = 0.0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    for i in range(len(positions)):
+        initial_centers = positions[i]
+        initial_radii = radii[i]
+
+        # Normalize to fit within the unit square
+        scale = min(1.0 / initial_centers.max(), 1.0 / initial_centers.min())
+        scaled_centers = initial_centers * scale
+        scaled_radii = initial_radii * scale
+
+        # Apply edge bias
+        edge_radius = 0.08
+        edge_weights = np.zeros(n)
+        for j in range(n):
+            x, y = scaled_centers[j]
+            if (x < edge_radius or x > 1 - edge_radius or
+                y < edge_radius or y > 1 - edge_radius):
+                edge_weights[j] = 1.5
+        scaled_radii *= edge_weights
+        scaled_radii = np.clip(scaled_radii, 0, 1.0)
+
+        # Initial guess
+        x0 = np.concatenate([scaled_centers.flatten(), scaled_radii])
+
+        # Bounds: [0, 1] for positions and [0, 1] for radii
+        bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+
+        # Constraints
+        cons = [
+            {'type': 'ineq', 'fun': lambda x: boundary_constraint(x, n)},
+            {'type': 'ineq', 'fun': lambda x: distance_constraint(x, n)}
+        ]
+
+        # Stage 1: Coarse optimization with SLSQP
+        result_1 = optimize.minimize(
+            lambda x: objective(x, n),
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-4,
+            options={'maxiter': 200}
+        )
+
+        # Stage 2: Refinement with tighter tolerances
+        result_2 = optimize.minimize(
+            lambda x: objective(x, n),
+            result_1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-6,
+            options={'maxiter': 300}
+        )
+
+        # Stage 3: Fine-tuning with more iterations
+        result_3 = optimize.minimize(
+            lambda x: objective(x, n),
+            result_2.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-8,
+            options={'maxiter': 500}
+        )
+
+        # Final result
+        centers = result_3.x[:2*n].reshape(n, 2)
+        radii = result_3.x[2*n:]
+        sum_radii = np.sum(radii)
+
+        # Validate result
+        valid, msg = validate_packing(centers, radii)
+        if not valid:
+            print("Invalid packing:", msg)
+            continue
+
+        # Keep track of the best result
+        if sum_radii > best_sum:
+            best_sum = sum_radii
+            best_centers = centers
+            best_radii = radii
+
+    # Final validation of best packing
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        print("Invalid packing:", msg)
+        raise ValueError(msg)
+
+    return (best_centers, best_radii, best_sum)
+```

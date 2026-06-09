@@ -345,6 +345,7 @@ def train_step(backend, model, tokenizer, sampler, optimizer, step_idx: int,
     from gen_workers import make_progress_bar
 
     step_t0 = time.time()
+    sampler.set_current_step(step_idx)
     parents = sampler.sample_states(cfg.groups_per_step)
     print(f"\n[step {step_idx}] parents picked: {len(parents)}")
     for i, info in enumerate(sampler.last_picks_info):
@@ -973,12 +974,52 @@ def main():
     else:
         print("[init] single-GPU generation (no worker pool)")
 
+
+    # ---- Elo re-ranker (optional, background thread) ----
+    reranker = None
+    try:
+        from reranker.config import RerankerConfig
+        rcfg = RerankerConfig.from_dict(merged)
+        if rcfg.enabled:
+            from reranker.judges import make_judge
+            from reranker.reranker import MultiAgentReRanker
+            judge = make_judge(rcfg)
+            if judge is not None:
+                reranker = MultiAgentReRanker(
+                    sampler=sampler,
+                    judge=judge,
+                    cfg=rcfg,
+                    metric_name=getattr(problem, "metric_name", "score"),
+                    maximize=getattr(problem, "maximize", True),
+                    target=getattr(problem, "target", None),
+                    exp_dir=exp_dir,
+                )
+
+
+                reranker.start()
+                print(f"[init] Elo re-ranker started "
+                      f"(backend={rcfg.backend}, model={rcfg.model}, "
+                      f"top_k={rcfg.top_k}, debate={rcfg.debate})")
+            else:
+                print("[init] Elo re-ranker enabled but judge unavailable; "
+                      "continuing with rank-based prior")
+        else:
+            print("[init] Elo re-ranker disabled")
+    except Exception as e:
+        print(f"[init] Elo re-ranker setup failed ({e!r}); "
+              f"continuing with rank-based prior")
+        reranker = None
+
+
     # ---- main loop ----
     try:
         for step in range(cfg.num_steps):
             train_step(backend, model, tokenizer, sampler, optimizer, step,
                        cfg, exp_dir, problem, gen_pool)
     finally:
+        if reranker is not None:
+            print("[shutdown] stopping Elo re-ranker ...")
+            reranker.stop()
         if gen_pool is not None:
             print("[shutdown] stopping generation pool ...")
             gen_pool.shutdown()

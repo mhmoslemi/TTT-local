@@ -1,5 +1,5 @@
 # # python train.py --num-circles 10 --target 1.6294 \
-     python train.py --num-circles 2 \
+     # python train.py --num-circles 2 \
 #                 --num-steps 5 \
 #                 --groups-per-step 2 \
 #                 --group-size 2 \
@@ -12,10 +12,15 @@
 
 
 # python train.py --num-circles 10 --target 1.6294 \
-python train_multy.py --num-circles 26 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train_multy.py --num-circles 26 \
                 --num-steps 60 \
                 --groups-per-step 8 \
-                --group-size 64 
+                --group-size 64
+
+               #  --num-steps 60 \
+               #  --groups-per-step 8 \
+               #  --group-size 64 
+
                 # \
                 # --max-new-tokens 6700 \
                 # --temperature 1 

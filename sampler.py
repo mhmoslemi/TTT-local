@@ -6,8 +6,11 @@ For each candidate state s in the archive, the selection score is:
     score(s) = Q(s) + c * scale * P(s) * sqrt(1 + T) / (1 + n(s))
 
   Q(s)   = max child reward seen so far from s (or R(s) if never expanded)
-  P(s)   = rank-based prior — high-reward states get more weight, but
-           everyone gets nonzero mass
+  P(s)   = rank-based prior by default; the top states may be re-weighted by an
+           external Elo prior produced asynchronously by a MultiAgentReRanker
+           (see reranker/). The Elo prior only RESHUFFLES the prior mass already
+           assigned to the elite set, so the exploration mass on the tail is
+           preserved and P(s) still sums to 1.
   scale  = max(R) - min(R) over the non-seed archive
   T      = total expansions performed
   n(s)   = expansions of s OR ANY DESCENDANT (so a successful lineage
@@ -15,21 +18,24 @@ For each candidate state s in the archive, the selection score is:
 
 When selecting a batch of B parents, we also exclude the full ancestor
 AND descendant set of each picked state from being picked again in the
-same batch. This is the paper's "lineage blocking" trick that prevents
-the batch from collapsing onto one promising thread.
+same batch ("lineage blocking").
 
 After each batch:
   - Push the new children into the archive
   - Keep top-K children per parent (K=2 by default)
   - Cap the archive at MAX_BUFFER_SIZE by reward (seeds always kept)
 
-State now also carries two problem-agnostic payloads, both optional:
-  - raw_score:   the TRUE metric (e.g. C5 bound, runtime us) for prompt display,
-                 separate from `value` which is always the higher-is-better reward.
-  - construction: an injected global (height_sequence_1 / initial_h_values) that
-                 is threaded parent -> child so a lineage can warm-start its search.
+State carries two optional problem-agnostic payloads:
+  - raw_score:   the TRUE metric for prompt display (separate from `value`).
+  - construction: an injected global threaded parent -> child for warm starts.
+
+THREAD-SAFETY: a background re-ranker thread reads the buffer via
+snapshot_top_states() and writes the Elo prior via set_external_prior(). Both,
+plus the buffer-mutating section of update(), are guarded by self._prior_lock
+(an RLock). The background thread NEVER holds the lock during LLM calls.
 """
 
+import threading
 import uuid
 import numpy as np
 from dataclasses import dataclass, field
@@ -54,7 +60,7 @@ class State:
             timestep=timestep,
             value=value,
             code=code,
-            parents=parents or [], # all the parents not just one
+            parents=parents or [],  # all the parents not just one
             is_seed=is_seed,
             raw_score=raw_score,
             construction=construction,
@@ -80,12 +86,24 @@ class PUCTSampler:
         self._m = {}   # state.id -> best child reward seen
         self._T = 0    # total expansions
 
+        self._current_step = 0   # most recently STARTED training step; the
+                                 # re-ranker tags its cycles with this so its
+                                 # logs line up with the step dirs.
+
+
         # Archive starts with seeds
         self._states = []
         self._seed_ids = set()
 
+        # ---- Elo re-ranker hook (filled by a background MultiAgentReRanker) ----
+        # Guards: buffer-rebuild in update(), snapshot_top_states(), and the
+        # external prior read/write. RLock so _blended_prior (called from
+        # sample_states) can re-enter from the same thread.
+        self._prior_lock = threading.RLock()
+        self._external_prior = {}          # state.id -> non-negative Elo weight
+        self._external_prior_alpha = 1.0   # 1.0 = Elo fully replaces rank in elite set
+
         if seed_states:
-            # Rich seeds from the problem: each carries code/value/raw_score/construction.
             for ss in seed_states:
                 s = State.make(
                     timestep=0,
@@ -98,7 +116,6 @@ class PUCTSampler:
                 self._states.append(s)
                 self._seed_ids.add(s.id)
         else:
-            # Fallback: num_seeds blank seeds at a constant value (circle-packing style).
             for _ in range(num_seeds):
                 s = State.make(timestep=0, value=seed_value, code="", is_seed=True)
                 self._states.append(s)
@@ -122,7 +139,6 @@ class PUCTSampler:
         lineage = {state.id}
         for p in state.parents:
             lineage.add(p["id"])
-        # BFS down through children
         queue = [state.id]
         visited = {state.id}
         while queue:
@@ -134,11 +150,7 @@ class PUCTSampler:
                     queue.append(c)
         return lineage
 
-
-
-
     def _scale(self):
-
         vals = np.array([
             s.value for s in self._states
             if s.id not in self._seed_ids and s.value is not None
@@ -146,7 +158,6 @@ class PUCTSampler:
         if vals.size == 0:
             return 1.0
         return float(max(vals.max() - vals.min(), 1e-6))
-
 
     def _prior(self, values):
         """Rank-based: best gets (N), worst gets 1; normalize to a distribution."""
@@ -156,6 +167,81 @@ class PUCTSampler:
         order = np.argsort(np.argsort(-values))  # rank 0 = best
         w = (N - order).astype(np.float64)
         return w / w.sum()
+
+    def _blended_prior(self, values: np.ndarray) -> np.ndarray:
+        """Rank prior over the whole buffer, with the Elo prior (if any) applied
+        ON TOP of the elite states. We only redistribute the prior mass the rank
+        prior already gave the elite group, so the tail's exploration mass is
+        untouched and the result still sums to 1."""
+        P = self._prior(values)
+        if P.size == 0:
+            return P
+
+        with self._prior_lock:
+            ext = dict(self._external_prior)            # id -> Elo weight
+            alpha = float(self._external_prior_alpha)
+        if not ext:
+            return P
+
+        # Indices of buffer states that currently have an Elo weight.
+        idx = [i for i, s in enumerate(self._states) if s.id in ext]
+        if len(idx) < 2:
+            return P
+        idx = np.array(idx, dtype=int)
+
+        m_K = float(P[idx].sum())                       # mass the rank prior gave this group
+        if m_K <= 0.0:
+            return P
+
+        elo_w = np.array([ext[self._states[i].id] for i in idx], dtype=np.float64)
+        elo_w = np.clip(elo_w, 0.0, None)
+        if elo_w.sum() <= 0.0:
+            return P
+        q_elo = elo_w / elo_w.sum()                     # Elo distribution over the group
+        q_rank = P[idx] / m_K                           # rank distribution over the same group
+
+        q = (1.0 - alpha) * q_rank + alpha * q_elo      # alpha=1 -> pure Elo
+        q = q / q.sum()
+
+        P = P.copy()
+        P[idx] = m_K * q                                # reshuffle within the group only
+        return P
+
+    # ------------------------------------------------------------------
+    # Thread-safe hooks for the background re-ranker
+    # ------------------------------------------------------------------
+    def snapshot_top_states(self, k: int):
+        """Thread-safe snapshot of the top-k states (by reward) that have actual
+        code. Returns lightweight dicts so the caller can run a slow LLM
+        tournament WITHOUT holding the sampler lock. (Top-k is by reward .value:
+        the full PUCT score also depends on visit counts and changes intra-step.)"""
+        with self._prior_lock:
+            cands = [s for s in self._states if s.code and s.code.strip()]
+            cands.sort(
+                key=lambda s: (s.value if s.value is not None else -np.inf),
+                reverse=True,
+            )
+            top = cands[: max(0, int(k))]
+            return [
+                {
+                    "id": s.id,
+                    "value": float(s.value) if s.value is not None else None,
+                    "raw_score": (float(s.raw_score)
+                                  if s.raw_score is not None else None),
+                    "code": s.code,
+                }
+                for s in top
+            ]
+
+    def set_external_prior(self, weights_by_id: dict, alpha: float = None):
+        """Install the Elo-derived prior. Only ids still in the buffer matter at
+        read time (sample_states filters). `alpha` interpolates Elo vs rank
+        within the elite set (1.0 = pure Elo)."""
+        with self._prior_lock:
+            self._external_prior = {str(k): float(v)
+                                    for k, v in (weights_by_id or {}).items()}
+            if alpha is not None:
+                self._external_prior_alpha = float(alpha)
 
     # ------------------------------------------------------------------
     # Public API
@@ -168,7 +254,7 @@ class PUCTSampler:
         values = np.array([s.value if s.value is not None else -np.inf
                            for s in self._states])
         scale = self._scale()
-        P = self._prior(values)
+        P = self._blended_prior(values)        # <-- rank prior + (optional) Elo re-ranking
         sqrtT = np.sqrt(1.0 + self._T)
 
         scored = []
@@ -203,7 +289,6 @@ class PUCTSampler:
 
         # If we couldn't fill the batch with blocking, top up without blocking
         if len(picks) < num_states:
-            remaining = num_states - len(picks)
             picked_ids = {s.id for s in picks}
             for entry in scored:
                 if len(picks) >= num_states:
@@ -224,99 +309,95 @@ class PUCTSampler:
     def update(self, children_with_parents):
         """
         Push new children into the archive and update PUCT stats.
-
-        children_with_parents: list of (child_state, parent_state)
+        children_with_parents: list of (child_state, parent_state).
         Only children with valid (non-None) values should be passed.
+
+        The whole body is guarded by _prior_lock so the background
+        snapshot_top_states() cannot iterate self._states while it is rebuilt.
         """
-        # Update visit counts (m, n, T) for ALL attempts, even failed ones,
-        # by calling record_failure separately. Here we only handle successes.
-        # Actually, let's match the paper: n increments on any expansion,
-        # m only on success.
-
-        # Update m for parents
-        parent_best = {}
-        parent_objs = {}
-        for child, parent in children_with_parents:
-            if child.value is None:
-                continue
-            pid = parent.id
-            parent_objs[pid] = parent
-            parent_best[pid] = max(parent_best.get(pid, -np.inf), float(child.value))
-
-        for pid, best in parent_best.items():
-            self._m[pid] = max(self._m.get(pid, best), best)
-
-        # Now incorporate children + dedup
-        existing_codes = {s.code for s in self._states if s.code}
-        new_states = []
-        for child, parent in children_with_parents:
-            if child.value is None:
-                continue
-            if child.code and child.code in existing_codes:
-                continue  # exact dup
-            # Set parent ref
-            child.parents = (
-                [{"id": parent.id, "timestep": parent.timestep}]
-                + (parent.parents or [])
-            )
-            new_states.append(child)
-            if child.code:
-                existing_codes.add(child.code)
-
-        self._states.extend(new_states)
-
-        # Enforce top-K children per parent (excluding seeds)
-        if self.topk_children > 0:
-            by_parent = {}
-            no_parent = []
-            for s in self._states:
-                if s.id in self._seed_ids or not s.parents:
-                    no_parent.append(s)
+        with self._prior_lock:
+            # Update m for parents (best child reward)
+            parent_best = {}
+            for child, parent in children_with_parents:
+                if child.value is None:
                     continue
-                pid = s.parents[0]["id"]
-                by_parent.setdefault(pid, []).append(s)
-            filtered = list(no_parent)
-            for children in by_parent.values():
-                children.sort(
+                pid = parent.id
+                parent_best[pid] = max(parent_best.get(pid, -np.inf), float(child.value))
+            for pid, best in parent_best.items():
+                self._m[pid] = max(self._m.get(pid, best), best)
+
+            # Incorporate children + dedup by exact code
+            existing_codes = {s.code for s in self._states if s.code}
+            new_states = []
+            for child, parent in children_with_parents:
+                if child.value is None:
+                    continue
+                if child.code and child.code in existing_codes:
+                    continue  # exact dup
+                child.parents = (
+                    [{"id": parent.id, "timestep": parent.timestep}]
+                    + (parent.parents or [])
+                )
+                new_states.append(child)
+                if child.code:
+                    existing_codes.add(child.code)
+
+            self._states.extend(new_states)
+
+            # Enforce top-K children per parent (excluding seeds)
+            if self.topk_children > 0:
+                by_parent = {}
+                no_parent = []
+                for s in self._states:
+                    if s.id in self._seed_ids or not s.parents:
+                        no_parent.append(s)
+                        continue
+                    pid = s.parents[0]["id"]
+                    by_parent.setdefault(pid, []).append(s)
+                filtered = list(no_parent)
+                for children in by_parent.values():
+                    children.sort(
+                        key=lambda x: x.value if x.value is not None else -np.inf,
+                        reverse=True,
+                    )
+                    filtered.extend(children[: self.topk_children])
+                self._states = filtered
+
+            # Cap archive size, always keeping seeds
+            if len(self._states) > self.max_buffer_size:
+                seeds = [s for s in self._states if s.id in self._seed_ids]
+                non_seeds = [s for s in self._states if s.id not in self._seed_ids]
+                non_seeds.sort(
                     key=lambda x: x.value if x.value is not None else -np.inf,
                     reverse=True,
                 )
-                filtered.extend(children[: self.topk_children])
-            self._states = filtered
-
-        # Cap archive size, always keeping seeds
-        if len(self._states) > self.max_buffer_size:
-            seeds = [s for s in self._states if s.id in self._seed_ids]
-            non_seeds = [s for s in self._states if s.id not in self._seed_ids]
-            non_seeds.sort(
-                key=lambda x: x.value if x.value is not None else -np.inf,
-                reverse=True,
-            )
-            keep_non_seeds = non_seeds[: self.max_buffer_size - len(seeds)]
-            self._states = seeds + keep_non_seeds
-
-
+                keep_non_seeds = non_seeds[: self.max_buffer_size - len(seeds)]
+                self._states = seeds + keep_non_seeds
 
     def record_expansion(self, parent: State, count: int = 1):
         """Called once per parent per step. Pass count=group_size so n and T
-        grow per-ROLLOUT (n[p]+=64, T+=512 per step at 8x64), matching discover,
-        which increments once per rollout in update_states / record_failed_rollout.
-        count=1 gives per-parent growth (n[p]+=1, T+=8), which is the paper's
-        Appendix A.2 prose but NOT what their code does."""
+        grow per-ROLLOUT (matching discover). count=1 gives per-parent growth."""
         anc_ids = [parent.id] + [p["id"] for p in (parent.parents or [])]
         for aid in anc_ids:
             self._n[aid] = self._n.get(aid, 0) + count
         self._T += count
 
-
     def best_state(self):
-        non_seeds = [s for s in self._states if s.id not in self._seed_ids]
-        if not non_seeds:
-            return None
-        return max(non_seeds, key=lambda s: s.value if s.value is not None else -np.inf)
+        with self._prior_lock:
+            non_seeds = [s for s in self._states if s.id not in self._seed_ids]
+            if not non_seeds:
+                return None
+            return max(non_seeds,
+                       key=lambda s: s.value if s.value is not None else -np.inf)
 
     def archive_size(self):
         return len(self._states)
+
+    def set_current_step(self, step: int):
+        self._current_step = int(step)
+
+    def get_current_step(self) -> int:
+        return self._current_step   
 
 
 if __name__ == "__main__":
@@ -326,11 +407,11 @@ if __name__ == "__main__":
     picks = sampler.sample_states(2)
     print(f"Picked {len(picks)} parents (all seeds):", [s.is_seed for s in picks])
 
-    # Simulate 2 rollouts that produced new states
     children = []
     for p in picks:
         sampler.record_expansion(p)
-        child = State.make(timestep=1, value=np.random.rand() * 2.5, code=f"code_{uuid.uuid4().hex[:6]}")
+        child = State.make(timestep=1, value=np.random.rand() * 2.5,
+                           code=f"code_{uuid.uuid4().hex[:6]}")
         children.append((child, p))
     sampler.update(children)
     print("After update:", sampler.archive_size())

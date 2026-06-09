@@ -1,0 +1,203 @@
+<strategy>
+To improve the circle packing in a unit square and achieve a higher sum of radii (target: 2.636), we can refine our approach by:
+
+1. **Improving Initial Placement**:
+   - The current hexagonal grid assumes uniform spacing, but optimal circle packing near boundaries and corners often requires more precise control. We can introduce a hybrid grid that is denser near the edges and corners to take advantage of the square's geometry.
+
+2. **Refinement of Optimization**:
+   - The current optimization uses a simplified penalty function. We can switch to a more effective optimization method (e.g., genetic algorithms) for complex packing problems, where the landscape is non-convex and has many local optima.
+   - Alternatively, we can use `scipy.optimize` with a more sophisticated optimization method such as `COBYLA` or `SLSQP` with tighter constraints.
+
+3. **Dynamic Constraints**:
+   - The current method applies a penalty for overlaps, but this can be less effective for dense or irregular packings. Instead, we can use soft constraints by incorporating overlap as a constraint in the optimization process to ensure non-overlapping with a tighter tolerance.
+
+4. **Boundary Handling**:
+   - The current method clips circles near the square's edges. We can further refine this by ensuring all circles are as close to the boundaries as possible without overlapping, maximizing the use of available space.
+
+5. **Refinement and Post-Processing**:
+   - After the initial optimization, a post-processing step can reposition circles to fill gaps, especially near the edges and corners, and potentially increase the total sum of radii.
+
+6. **Hybrid Packing Patterns**:
+   - We can try combining hexagonal packing with a staggered grid near the edges, similar to how people pack spheres in a box. This strategy often performs better than strict hexagonal or square packing for constrained geometries like a square.
+
+7. **Improved Random Initialization**:
+   - The current method initializes circles in a hexagonal grid with some randomness added later. We can instead use a more diverse set of initial configurations, including random initial positions, to avoid getting stuck in poor local optima.
+
+8. **Parallelization and Iterative Refinement**:
+   - For complex packings, we can apply multiple rounds of optimization and refinement, adjusting circle positions and sizes iteratively to converge to a more optimal packing.
+
+Now, we will implement a more refined version of the algorithm that incorporates these ideas.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import random
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    num_circles = 26
+
+    # Define a hybrid grid: hexagonal near center, denser near edges and corners
+    def hybrid_grid(n):
+        # Initial hexagonal grid
+        spacing = 0.16
+        rows = int(np.sqrt(n))
+        cols = int(np.ceil(n / rows))
+        centers = []
+        for i in range(rows):
+            for j in range(cols):
+                x = j * spacing + 0.5 * spacing
+                y = i * (np.sqrt(3) * spacing) + 0.5 * (np.sqrt(3) * spacing)
+                # Adjust for boundaries and corners
+                if x < 1e-6:
+                    x = 1e-6
+                if x > 1 - 1e-6:
+                    x = 1 - 1e-6
+                if y < 1e-6:
+                    y = 1e-6
+                if y > 1 - 1e-6:
+                    y = 1 - 1e-6
+                centers.append([x, y])
+                if len(centers) == n:
+                    break
+            if len(centers) == n:
+                break
+        # Add more circles if necessary, placed near corners and edges
+        while len(centers) < n:
+            # Randomly pick a corner or edge region
+            corner = random.choice([(0, 0), (1, 0), (0, 1), (1, 1)])
+            if random.random() < 0.5:
+                # Place near an edge
+                edge = random.choice(['top', 'bottom', 'left', 'right'])
+                if edge == 'top':
+                    y = 1 - 1e-6
+                    x = np.random.uniform(0.1, 0.9)
+                elif edge == 'bottom':
+                    y = 1e-6
+                    x = np.random.uniform(0.1, 0.9)
+                elif edge == 'left':
+                    x = 1e-6
+                    y = np.random.uniform(0.1, 0.9)
+                elif edge == 'right':
+                    x = 1 - 1e-6
+                    y = np.random.uniform(0.1, 0.9)
+                else:
+                    # Place near a corner
+                    x, y = corner
+                    x += np.random.uniform(-0.1, 0.1)
+                    y += np.random.uniform(-0.1, 0.1)
+                    x = max(1e-6, min(1 - 1e-6, x))
+                    y = max(1e-6, min(1 - 1e-6, y))
+            else:
+                # Place randomly within the square
+                x = np.random.uniform(1e-6, 1 - 1e-6)
+                y = np.random.uniform(1e-6, 1 - 1e-6)
+            centers.append([x, y])
+        return np.array(centers)
+
+    # Initial guess with optimized placement
+    centers = hybrid_grid(num_circles)
+    initial_radius = 0.045
+    radii = np.full(num_circles, initial_radius)
+
+    # Define optimization objective: maximize sum of radii
+    def objective(x):
+        centers = x[:2 * num_circles].reshape(num_circles, 2)
+        radii = x[2 * num_circles:]
+        return -np.sum(radii)  # Minimize negative sum of radii to maximize sum
+
+    # Define constraints: non-overlapping, within square
+    def constraints(x):
+        centers = x[:2 * num_circles].reshape(num_circles, 2)
+        radii = x[2 * num_circles:]
+        # Check boundaries
+        for i in range(num_circles):
+            if (centers[i, 0] < 0 - 1e-12 or centers[i, 0] > 1 + 1e-12 or
+                centers[i, 1] < 0 - 1e-12 or centers[i, 1] > 1 + 1e-12):
+                return np.inf
+        # Check non-negative radii
+        for r in radii:
+            if r < 0:
+                return np.inf
+        # Check non-overlapping with a penalty for overlap
+        penalty = 0
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < radii[i] + radii[j] - 1e-12:
+                    penalty += 1e4 * (radii[i] + radii[j] - dist)
+        return penalty
+
+    # Initial guess
+    initial_guess = np.concatenate([centers.reshape(-1), radii])
+
+    # Bounds: All centers between 0 and 1, all radii non-negative
+    bounds = []
+    for _ in range(2 * num_circles):
+        bounds.append((0.0, 1.0))
+    for _ in range(num_circles):
+        bounds.append((0.0, 1.0))
+
+    # Solve the optimization
+    result = opt.minimize(
+        objective,
+        initial_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints={'type': 'ineq', 'fun': constraints},
+        tol=1e-8,
+        options={'maxiter': 1000, 'disp': False}
+    )
+
+    optimal_centers = result.x[:2 * num_circles].reshape(num_circles, 2)
+    optimal_radii = result.x[2 * num_circles:]
+    optimal_sum = -result.fun
+
+    # Refinement: Adjust overlapping circles more effectively
+    for _ in range(5):
+        dist_matrix = np.zeros((num_circles, num_circles))
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                dist_matrix[i, j] = np.sqrt(np.sum((optimal_centers[i] - optimal_centers[j]) ** 2))
+        overlap_mask = dist_matrix < (optimal_radii[i] + optimal_radii[j] - 1e-12)
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                if overlap_mask[i, j]:
+                    # Move the circles apart
+                    opt_centers_i = optimal_centers[i].copy()
+                    opt_centers_j = optimal_centers[j].copy()
+                    dx = optimal_centers[i, 0] - optimal_centers[j, 0]
+                    dy = optimal_centers[i, 1] - optimal_centers[j, 1]
+                    dist = np.sqrt(dx**2 + dy**2)
+                    if dist > 1e-12:
+                        unit_vec = np.array([dx, dy]) / dist
+                        move_distance = optimal_radii[i] + optimal_radii[j] - dist + 1e-12
+                        optimal_centers[i] -= unit_vec * move_distance * 0.5
+                        optimal_centers[j] += unit_vec * move_distance * 0.5
+                        # Adjust radii if needed
+                        if np.any(optimal_centers[i] < 0) or np.any(optimal_centers[i] > 1):
+                            optimal_centers[i] = np.clip(optimal_centers[i], 0, 1)
+                        if np.any(optimal_centers[j] < 0) or np.any(optimal_centers[j] > 1):
+                            optimal_centers[j] = np.clip(optimal_centers[j], 0, 1)
+                        optimal_radii[i] *= 0.99
+                        optimal_radii[j] *= 0.99
+
+    # Validate and fallback
+    try:
+        _, msg = validate_packing(optimal_centers, optimal_radii)
+        if msg != "ok":
+            print("Validation failed:", msg)
+            # Fallback to initial packing
+            optimal_centers = centers
+            optimal_radii = radii
+            optimal_sum = np.sum(radii)
+        else:
+            print("Packing valid:", optimal_sum)
+    except:
+        print("Validation failed, falling back to initial packing")
+        optimal_centers = centers
+        optimal_radii = radii
+        optimal_sum = np.sum(radii)
+
+    return optimal_centers, optimal_radii, optimal_sum
+```

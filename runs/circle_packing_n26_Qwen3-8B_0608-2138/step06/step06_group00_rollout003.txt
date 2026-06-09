@@ -1,0 +1,141 @@
+<strategy>
+To improve the circle packing in the unit square, we can implement several key strategies that address the current limitations of the original configuration:
+
+1. **Optimal Placement Near Boundaries and Corners**:
+   - The current setup has circles placed in a grid-like pattern, but it does not take full advantage of the corners, which can be used to fit more circles with larger radii. We can use a more optimized placement that places more circles near the corners, with careful spacing to allow for larger radii.
+
+2. **Hexagonal Packing**:
+   - Hexagonal packing is known to be the most efficient for circle packing in a 2D plane, especially for large numbers of circles. This arrangement allows for the densest packing and can yield larger radii due to the efficient spacing between circles.
+   - We can adapt a hexagonal lattice to fit within the unit square, placing circles in rows with staggered positions to reduce wasted space.
+
+3. **Refined Initialization**:
+   - Start with a more strategic initialization that places circles in a hexagonal grid near the corners and edges of the square. Use a smaller number of circles in the central area to allow larger radii in the outer regions.
+
+4. **Optimization Parameters and Method**:
+   - The original implementation uses Sequential Least Squares Programming (SLSQP), which may not be the best choice for high-dimensional optimization with nonlinear constraints.
+   - We can try using the `scipy.optimize.minimize` function with a different method, such as the `Nelder-Mead` simplex algorithm, which is more robust for constrained optimization and can handle irregular or non-smooth functions.
+
+5. **Refinement and Local Adjustment**:
+   - After the main optimization, perform additional refinement steps to adjust overlapping circles, especially those near the boundaries, to ensure optimal placement.
+   - Use a local search near the edges and corners to maximize radii by slightly adjusting the positions and sizes of the circles.
+
+6. **Hybrid Approach**:
+   - Combine the strengths of hexagonal packing with a more flexible optimization to find a configuration that is both efficient and robust.
+
+By implementing these strategies, we can achieve a more optimal packing with higher total radii, potentially reaching or exceeding the target sum of 2.636.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+from typing import Tuple, Any
+
+def run_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    num_circles = 26
+    # Hexagonal packing near corners and edges
+    # Start with a more strategic initialization placing circles in a hexagonal grid
+    centers = np.zeros((num_circles, 2))
+    radii = np.zeros(num_circles)
+
+    # Hexagonal grid with offset rows
+    row_offset = 0.5 * np.sqrt(3) * 0.05  # Offset between rows for hexagonal packing
+    col_spacing = 0.1  # Spacing between columns
+    row_spacing = 0.1 + row_offset  # Spacing between rows
+
+    # Place more circles near the corners, starting from top-left
+    for i in range(num_circles):
+        row = i // 5  # 5 columns per row for the hexagonal arrangement
+        col = i % 5
+        x = col * col_spacing + 0.05  # Offset to avoid edges
+        y = row * row_spacing + 0.05 + row * row_offset  # Offset to account for hexagonal packing
+        centers[i, 0] = x
+        centers[i, 1] = y
+        # Adjust for edge cases and avoid overlap
+        if col % 2 == 1:
+            y += row_offset
+
+    # Initial radii based on spacing
+    initial_radius = 0.05
+    radii = np.full(num_circles, initial_radius)
+
+    # Objective function to maximize sum of radii
+    def objective(x):
+        # x is a vector of size 2 * num_circles + num_circles = 3 * num_circles
+        # x[0:2*num_circles] are the centers (2D per circle)
+        # x[2*num_circles:] are the radii
+        centers = x[:2 * num_circles].reshape(num_circles, 2)
+        radii = x[2 * num_circles:]
+        return -np.sum(radii)  # Minimize negative sum of radii to maximize sum
+
+    # Constraints function for optimization
+    def constraints(x):
+        # Constraint 1: All centers within [0,1]^2
+        centers = x[:2 * num_circles].reshape(num_circles, 2)
+        for i in range(num_circles):
+            if not (0 - 1e-12 <= centers[i, 0] <= 1 + 1e-12 and 0 - 1e-12 <= centers[i, 1] <= 1 + 1e-12):
+                return np.inf
+        # Constraint 2: All radii non-negative
+        for r in x[2 * num_circles:]:
+            if r < 0:
+                return np.inf
+        # Constraint 3: No overlaps
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < x[2 * num_circles + i] + x[2 * num_circles + j] - 1e-12:
+                    return np.inf
+        return 0
+
+    # Initial guess
+    initial_guess = np.concatenate([centers.reshape(-1), radii])
+
+    # Bounds: All centers between 0 and 1, all radii non-negative
+    bounds = []
+    for _ in range(2 * num_circles):
+        bounds.append((0.0, 1.0))
+    for _ in range(num_circles):
+        bounds.append((0.0, 1.0))
+
+    # Solve the optimization using Nelder-Mead for better robustness
+    result = opt.minimize(
+        objective,
+        initial_guess,
+        method='Nelder-Mead',
+        bounds=bounds,
+        constraints={'type': 'ineq', 'fun': constraints},
+        tol=1e-10,
+        options={'maxiter': 500, 'disp': False}
+    )
+
+    optimal_centers = result.x[:2 * num_circles].reshape(num_circles, 2)
+    optimal_radii = result.x[2 * num_circles:]
+    optimal_sum = -result.fun  # Since the objective is -sum(radii)
+
+    # Refinement step to adjust small overlaps
+    for _ in range(3):
+        # Check for overlaps and adjust radii
+        dist_matrix = np.zeros((num_circles, num_circles))
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                dist_matrix[i, j] = np.sqrt(np.sum((optimal_centers[i] - optimal_centers[j]) ** 2))
+        overlap_mask = dist_matrix < (optimal_radii[i] + optimal_radii[j] - 1e-12)
+        for i in range(num_circles):
+            for j in range(i + 1, num_circles):
+                if overlap_mask[i, j]:
+                    # Adjust radii
+                    optimal_radii[i] *= 0.99
+                    optimal_radii[j] *= 0.99
+
+    # Verify and validate again to be safe
+    _, msg = validate_packing(optimal_centers, optimal_radii)
+    if msg != "ok":
+        print("Validation failed:", msg)
+        # Fallback to initial packing
+        optimal_centers = centers
+        optimal_radii = radii
+        optimal_sum = np.sum(radii)
+    else:
+        print("Packing valid:", optimal_sum)
+
+    return optimal_centers, optimal_radii, optimal_sum
+```

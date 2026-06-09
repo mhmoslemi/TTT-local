@@ -1,0 +1,258 @@
+=== SYSTEM ===
+You are an expert computational geometer and numerical optimization specialist evaluating two algorithmic strategies for the Circle Packing problem. The objective is to pack N circles within a [0,1]x[0,1] unit square to maximize the sum of their radii without any overlap.
+
+CRITICAL DIRECTIVE: DO NOT evaluate these scripts based on code readability, elegance, comments, or software engineering best practices. A messy, hardcoded, or unconventional script that uses superior geometric heuristics to achieve a tighter packing is strictly better than a clean, standard script that gets trapped in a local minimum.
+
+=== USER ===
+Goal: Discover a program whose output maximizes the metric 'sum of radii' (target 2.636). We search by repeatedly expanding promising programs sampled from a buffer.
+
+Evaluate the structural potential of the two approaches based purely on these mathematical criteria:
+* Initialization Strategy: Does the algorithm seed the centers intelligently (e.g., hexagonal lattices, staggered grids, boundary-hugging) rather than relying on pure uniform random placement?
+* Optimization Engine: Does it utilize a robust method for non-convex spaces (e.g., SLSQP with strict bounds, simulated annealing, basin-hopping, or physics-based repulsion/expansion)?
+* Local Optima Escape: Does the algorithm include perturbation mechanics (jiggling, swapping, targeted radius inflation) to break out of jammed configurations?
+* Constraint Handling: How mathematically sound is the enforcement of the `x, y +/- r <= 1` boundaries and the `dist >= r_i + r_j` overlap rules?
+
+Judge only the merit and headroom of each approach. Do not assume that the
+already-measured score decides the comparison.
+
+Approach 1:
+```python
+import numpy as np
+import scipy.optimize as optimize
+import random
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+    centers = np.zeros((n, 2))
+    radii = np.zeros(n)
+
+    # Step 1: Initialize with a hexagonal grid with more dense packing near boundaries
+    # Central hexagonal grid
+    num_rows = 5
+    num_cols = 6
+    spacing_x = 1.0 / (num_cols + 1)
+    spacing_y = 1.0 / (num_rows + 1)
+
+    # Initialize central grid with random jitter
+    for i in range(n - 4):  # Leave space for corner circles
+        row = i // num_cols
+        col = i % num_cols
+        # Add a random jitter to break symmetry
+        jitter = 0.05 * np.random.rand(2) - 0.025
+        x = col * spacing_x + spacing_x / 2 + jitter[0]
+        y = row * spacing_y + spacing_y / 2 + jitter[1]
+        centers[i, 0] = x
+        centers[i, 1] = y
+        # Estimate initial radius based on spacing
+        radii[i] = spacing_x / 2 - 1e-4
+
+    # Step 2: Add corner and edge circles
+    # Place corner circles
+    corner_radius = 0.05
+    corner_positions = [
+        (0.1, 0.1),
+        (0.9, 0.1),
+        (0.1, 0.9),
+        (0.9, 0.9)
+    ]
+    for idx, pos in enumerate(corner_positions):
+        i = n - 4 + idx
+        centers[i, 0], centers[i, 1] = pos
+        radii[i] = corner_radius
+
+    # Step 3: Define optimization
+    x = np.concatenate([centers.flatten(), radii])
+
+    # Step 4: Define objective function to maximize sum of radii
+    def objective(x):
+        centers_opt = x[:2*n].reshape(n, 2)
+        radii_opt = x[2*n:]
+        return -np.sum(radii_opt)  # minimize negative sum
+
+    # Step 5: Define constraints with strict equality for better precision
+    # Constraint: radii >= 0
+    constraints = []
+
+    for i in range(n):
+        constraints.append({'type': 'ineq', 'fun': lambda x, i=i: x[2*n + i]})
+
+    # Constraint: circles inside the unit square (strict inequality)
+    for i in range(n):
+        def square_constraint_left(x, i=i):
+            x_center = x[:2*n][2*i:2*i+2]
+            r = x[2*n + i]
+            return x_center[0] - r  # x - r >= 0
+        constraints.append({'type': 'ineq', 'fun': square_constraint_left})
+
+        def square_constraint_right(x, i=i):
+            x_center = x[:2*n][2*i:2*i+2]
+            r = x[2*n + i]
+            return 1 - x_center[0] - r  # 1 - x - r >= 0
+        constraints.append({'type': 'ineq', 'fun': square_constraint_right})
+
+        def square_constraint_bottom(x, i=i):
+            x_center = x[:2*n][2*i:2*i+2]
+            r = x[2*n + i]
+            return x_center[1] - r  # y - r >= 0
+        constraints.append({'type': 'ineq', 'fun': square_constraint_bottom})
+
+        def square_constraint_top(x, i=i):
+            x_center = x[:2*n][2*i:2*i+2]
+            r = x[2*n + i]
+            return 1 - x_center[1] - r  # 1 - y - r >= 0
+        constraints.append({'type': 'ineq', 'fun': square_constraint_top})
+
+    # Constraint: circles do not overlap (strict inequality)
+    for i in range(n):
+        for j in range(i + 1, n):
+            def non_overlap_constraint(x, i=i, j=j):
+                x_i = x[:2*n][2*i:2*i+2]
+                x_j = x[:2*n][2*j:2*j+2]
+                r_i = x[2*n + i]
+                r_j = x[2*n + j]
+                dx = x_i[0] - x_j[0]
+                dy = x_i[1] - x_j[1]
+                dist = np.sqrt(dx**2 + dy**2)
+                return dist - (r_i + r_j)  # dist >= r_i + r_j
+            constraints.append({'type': 'ineq', 'fun': non_overlap_constraint})
+
+    # Step 6: Set bounds for optimization
+    bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+
+    # Step 7: Use multi-start optimization with SLSQP
+    # Run optimization from 5 different starting points
+    best_sum = 0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    for _ in range(5):
+        # Randomly perturb initial positions
+        perturbation = 0.1 * np.random.rand(n, 2) - 0.05
+        centers_perturbed = centers + perturbation
+        # Ensure positions stay within [
+# ... [truncated for comparison] ...
+
+```
+
+Approach 2:
+```python
+import numpy as np
+import scipy.optimize as optimize
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+
+    # Define multiple initial position strategies
+    def initial_positions_strategies(n):
+        # Strategy 1: Hexagonal grid
+        def hexagonal_positions(n):
+            positions = []
+            for i in range(n):
+                row = i // 5
+                col = i % 5
+                x = col * (1.0 / np.sqrt(3))
+                y = row * (1.0 / np.sqrt(3)) * (np.sqrt(3) / 2)
+                if row % 2 == 1:
+                    y += (1.0 / np.sqrt(3)) * (np.sqrt(3) / 4)
+                positions.append([x, y])
+            return np.array(positions)
+
+        # Strategy 2: Random positions within square
+        def random_positions(n):
+            return np.random.rand(n, 2)
+
+        # Strategy 3: Clusters at corners
+        def corner_clusters(n):
+            corners = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+            positions = []
+            for i in range(n):
+                if i % 4 == 0:
+                    positions.append([0.2, 0.2])
+                elif i % 4 == 1:
+                    positions.append([0.8, 0.2])
+                elif i % 4 == 2:
+                    positions.append([0.8, 0.8])
+                else:
+                    positions.append([0.2, 0.8])
+            return np.array(positions)
+
+        # Strategy 4: Grid with random offsets
+        def grid_positions(n):
+            positions = []
+            for i in range(n):
+                row = i // 5
+                col = i % 5
+                x = col * 0.2 + np.random.uniform(-0.05, 0.05)
+                y = row * 0.2 + np.random.uniform(-0.05, 0.05)
+                positions.append([x, y])
+            return np.array(positions)
+
+        return [hexagonal_positions(n), random_positions(n), corner_clusters(n), grid_positions(n)]
+
+    # Generate multiple initial guesses
+    initial_position_strategies = initial_positions_strategies(n)
+    best_sum_radii = 0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    for positions in initial_position_strategies:
+        # Normalize positions to fit within the unit square
+        positions /= np.max(np.abs(positions))
+        initial_radii = np.full(n, 1.0 / (2 * np.sqrt(3)))
+
+        # Define objective function
+        def objective(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            return -np.sum(radii)  # We minimize negative of sum to maximize sum
+
+        # Define constraints
+        def boundary_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            return np.concatenate([centers[:, 0] - radii - 1e-6, 
+                                  1 - centers[:, 0] - radii - 1e-6,
+                                  centers[:, 1] - radii - 1e-6, 
+                                  1 - centers[:, 1] - radii - 1e-6])
+
+        def distance_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            dist = np.zeros(n * (n - 1) // 2)
+            idx = 0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = centers[i, 0] - centers[j, 0]
+                    dy = centers[i, 1] - centers[j, 1]
+                    dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-6
+                    idx += 1
+            return dist
+
+        # Initial guess
+        x0 = np.concatenate([positions.flatten(), initial_radii])
+
+        # Bounds: [0, 1] for positions and [0, 1] for radii
+        bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+
+        # Constraints
+        cons = [
+            {'type': 'ineq', 'fun': boundary_constraint},
+            {'type': 'ineq', 'fun': distance_constraint}
+        ]
+
+        # Optimization
+        result = optimize.minimize(
+            objective,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-6,
+
+# ... [truncated for comparison] ...
+
+```
+
+Briefly reason about the mathematical and optimization superiority of one
+approach over the other, then conclude with exactly the phrase:
+"better idea: <1 or 2>".

@@ -110,7 +110,7 @@ for s in $STEPS; do
         [ -z "$rank" ] && continue
 
         txt_file="${meta_file%.meta.json}.txt"
-        reward_fmt=$(printf "%.4f" "$reward")
+        reward_fmt=$(printf "%.10f" "$reward")
         group_fmt=$(printf "%02d" "$group")
         rollout_fmt=$(printf "%03d" "$rollout")
 
