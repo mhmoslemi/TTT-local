@@ -1,0 +1,288 @@
+<strategy>
+To improve the packing of 26 circles in a unit square, we consider several strategies and enhancements over the previous approach:
+
+1. **Optimal Placement Near Boundaries and Corners**:
+   - The previous method tried to penalize circles near the edges and corners, but we might be able to further refine this. Circles at the edges or corners can have larger radii without overlapping, so we can apply a stronger bias to allow for better growth in those areas.
+   - We can use a more intelligent weighting scheme for edge/corner penalties to encourage growth in areas where the circles are not restricted by neighbors.
+
+2. **Alternative Arrangements**:
+   - The hexagonal packing is efficient for large numbers of circles, but for 26 circles, it's still a good baseline. We can try variations of the hexagonal layout, such as staggered rows, or use a hybrid approach combining hexagonal and nested layouts.
+   - Nested layouts can help cluster circles in a more compact way, especially near the center, which might help reduce the overall bounding box and allow for larger radii.
+
+3. **Gap Filling and Circle Repositioning**:
+   - The previous code used initial guesses to start the optimization. We can generate a more diverse set of initial configurations and allow the optimizer to explore better solutions.
+   - We can use more advanced optimization methods, such as differential evolution or more refined gradient-based solvers, to escape local optima.
+
+4. **Optimization Parameters and Methods**:
+   - The L-BFGS-B and SLSQP methods are used in the current setup, which can be effective but may get stuck in local minima. We can also add constraint handling to ensure boundary conditions are properly enforced.
+   - We can try increasing the tolerance and number of iterations for the optimization steps to allow for more refinement of the solution.
+
+5. **Refinement Strategy**:
+   - We can use post-processing to refine the best packing found with additional optimization steps, such as simulated annealing or a final round of constraint satisfaction.
+   - The current refinement step already applies a second optimization, but we can fine-tune the parameters to improve the final results.
+
+Based on these considerations, we plan to:
+- Use a more refined edge/corner weighting scheme to allow for better circle placement.
+- Introduce a more diverse set of initial configurations, including nested, hybrid, and hexagonal arrangements.
+- Use more robust optimization parameters and methods, such as differential evolution or constrained optimization with tighter tolerances.
+- Increase the number of iterations for both the initial and refinement steps to allow the optimizer to converge better.
+- Ensure the centers and radii remain within the valid range while allowing for larger growth near the edges and corners.
+
+Now, we implement the improved version of `run_packing` with these enhancements.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+from scipy.optimize import differential_evolution, Bounds
+
+def generate_hexagonal_positions(n, spacing, offset_x, offset_y):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        x = col * spacing + offset_x
+        y = row * spacing + (col % 2) * spacing * 0.5 + offset_y
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_corner_positions(n):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+        y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_zigzag_positions(n):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        base_x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+        base_y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+        x = base_x
+        y = base_y + (0.02 if (row + col) % 2 == 1 else 0.0)
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_hybrid_positions(n):
+    positions = []
+    for i in range(n):
+        row = i // 5
+        col = i % 5
+        base_x = col * 0.2 + (0.3 if col == 0 or col == 4 else 0.0)
+        base_y = row * 0.2 + (0.3 if row == 0 or row == 4 else 0.0)
+        x = base_x + (0.02 if row < 2 or row > 3 else 0.0)
+        y = base_y + (0.02 if col < 2 or col > 3 else 0.0)
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_nested_positions(n, spacing, offset_x, offset_y):
+    positions = []
+    for i in range(n):
+        level = i // 5
+        offset = i % 5
+        x = offset * spacing + offset_x
+        y = level * spacing + offset_y
+        positions.append([x, y])
+    return np.array(positions)
+
+def generate_random_positions(n):
+    positions = np.random.rand(n, 2)
+    return positions
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    n = 26
+    edge_radius = 0.08
+    initial_guesses = [
+        (generate_hexagonal_positions(n, 0.23, 0.1, 0.1), np.full(n, 0.04)),
+        (generate_corner_positions(n), np.full(n, 0.04)),
+        (generate_zigzag_positions(n), np.full(n, 0.04)),
+        (generate_hybrid_positions(n), np.full(n, 0.04)),
+        (generate_nested_positions(n, 0.23, 0.1, 0.1), np.full(n, 0.04)),
+        (generate_random_positions(n), np.full(n, 0.04)),
+        (generate_hexagonal_positions(n, 0.22, 0.15, 0.15), np.full(n, 0.04)),
+        (generate_nested_positions(n, 0.22, 0.15, 0.15), np.full(n, 0.04)),
+        (generate_corner_positions(n), np.full(n, 0.04)),
+        (generate_hexagonal_positions(n, 0.21, 0.15, 0.15), np.full(n, 0.04)),
+        (generate_nested_positions(n, 0.21, 0.15, 0.15), np.full(n, 0.04)),
+        (generate_hexagonal_positions(n, 0.24, 0.15, 0.15), np.full(n, 0.04)),  # New guess
+    ]
+
+    best_sum = 0.0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    def objective(x):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        edge_bias = 0.0
+        for j in range(n):
+            x_j, y_j = centers[j]
+            r_j = radii[j]
+            if x_j < edge_radius or x_j > 1 - edge_radius or y_j < edge_radius or y_j > 1 - edge_radius:
+                edge_bias += r_j
+        return -np.sum(radii) - edge_bias * 0.3  # Stronger edge bias
+
+    def boundary_constraint(x):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        left = centers[:, 0] - radii - 1e-10
+        right = 1.0 - centers[:, 0] - radii - 1e-10
+        bottom = centers[:, 1] - radii - 1e-10
+        top = 1.0 - centers[:, 1] - radii - 1e-10
+        return np.concatenate([left, right, bottom, top])
+
+    def distance_constraint(x):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        dist = np.zeros(n * (n - 1) // 2)
+        idx = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-10
+                idx += 1
+        return dist
+
+    def refine_packing(centers, radii):
+        def refined_objective(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            edge_bias = 0.0
+            for j in range(n):
+                x_j, y_j = centers[j]
+                r_j = radii[j]
+                if x_j < edge_radius or x_j > 1 - edge_radius or y_j < edge_radius or y_j > 1 - edge_radius:
+                    edge_bias += r_j
+            return -np.sum(radii) - edge_bias * 0.3
+
+        def refined_boundary_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            left = centers[:, 0] - radii - 1e-10
+            right = 1.0 - centers[:, 0] - radii - 1e-10
+            bottom = centers[:, 1] - radii - 1e-10
+            top = 1.0 - centers[:, 1] - radii - 1e-10
+            return np.concatenate([left, right, bottom, top])
+
+        def refined_distance_constraint(x):
+            centers = x[:2*n].reshape(n, 2)
+            radii = x[2*n:]
+            dist = np.zeros(n * (n - 1) // 2)
+            idx = 0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = centers[i, 0] - centers[j, 0]
+                    dy = centers[i, 1] - centers[j, 1]
+                    dist[idx] = np.sqrt(dx * dx + dy * dy) - radii[i] - radii[j] - 1e-10
+                    idx += 1
+            return dist
+
+        x0 = np.concatenate([centers.flatten(), radii])
+        bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+        cons = [
+            {'type': 'ineq', 'fun': refined_boundary_constraint},
+            {'type': 'ineq', 'fun': refined_distance_constraint}
+        ]
+
+        result_1 = optimize.minimize(
+            refined_objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-4,
+            options={'maxiter': 200}
+        )
+
+        result_2 = optimize.minimize(
+            refined_objective,
+            result_1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-6,
+            options={'maxiter': 300}
+        )
+
+        centers = result_2.x[:2*n].reshape(n, 2)
+        radii = result_2.x[2*n:]
+        sum_radii = np.sum(radii)
+        valid, msg = validate_packing(centers, radii)
+        if not valid:
+            print("Invalid packing:", msg)
+            return centers, radii
+        return centers, radii
+
+    for i, (positions, radii) in enumerate(initial_guesses):
+        scale = min(1.0 / positions.max(), 1.0 / positions.min())
+        scaled_positions = positions * scale
+        scaled_radii = radii * scale
+
+        edge_weights = np.zeros(n)
+        corner_weights = np.zeros(n)
+        for j in range(n):
+            x, y = scaled_positions[j]
+            if x < edge_radius or x > 1 - edge_radius or y < edge_radius or y > 1 - edge_radius:
+                edge_weights[j] = 1.5
+            if (x < edge_radius and y < edge_radius) or (x < edge_radius and y > 1 - edge_radius) or \
+               (x > 1 - edge_radius and y < edge_radius) or (x > 1 - edge_radius and y > 1 - edge_radius):
+                corner_weights[j] = 1.8
+
+        scaled_radii *= edge_weights * corner_weights
+        scaled_radii = np.clip(scaled_radii, 0, 1.0)
+
+        x0 = np.concatenate([scaled_positions.flatten(), scaled_radii])
+        bounds = [(0, 1) for _ in range(2*n)] + [(0, 1) for _ in range(n)]
+        cons = [
+            {'type': 'ineq', 'fun': boundary_constraint},
+            {'type': 'ineq', 'fun': distance_constraint}
+        ]
+
+        result_1 = optimize.minimize(
+            objective,
+            x0,
+            method='L-BFGS-B',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-4,
+            options={'maxiter': 200}
+        )
+
+        result_2 = optimize.minimize(
+            objective,
+            result_1.x,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-6,
+            options={'maxiter': 300}
+        )
+
+        centers = result_2.x[:2*n].reshape(n, 2)
+        radii = result_2.x[2*n:]
+        sum_radii = np.sum(radii)
+
+        valid, msg = validate_packing(centers, radii)
+        if not valid:
+            print("Invalid packing:", msg)
+            continue
+
+        if sum_radii > best_sum:
+            best_sum = sum_radii
+            best_centers = centers
+            best_radii = radii
+
+    best_centers, best_radii = refine_packing(best_centers, best_radii)
+    valid, msg = validate_packing(best_centers, best_radii)
+    if not valid:
+        print("Invalid packing:", msg)
+        raise ValueError(msg)
+
+    return (best_centers, best_radii, best_sum)
+```

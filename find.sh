@@ -23,17 +23,20 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUNS_DIR="$SCRIPT_DIR/runs"
 
-# Latest run dir by modification time
-RUN_DIR=$(ls -td "$RUNS_DIR"/*/ 2>/dev/null | head -1 | sed 's|/$||')
-
-if [ -z "$RUN_DIR" ]; then
-    echo "No run directories found in $RUNS_DIR"
-    exit 1
+if [ -n "$1" ]; then
+    RUN_DIR="$(cd "$1" && pwd)"
+else
+    # Latest run dir by modification time
+    RUN_DIR=$(ls -td "$RUNS_DIR"/*/ 2>/dev/null | head -1 | sed 's|/$||')
+    if [ -z "$RUN_DIR" ]; then
+        echo "No run directories found in $RUNS_DIR"
+        exit 1
+    fi
 fi
 
 echo "Run: $RUN_DIR"
 
-OUT_DIR="${1:-$RUN_DIR/results}"
+OUT_DIR="$RUN_DIR/results"
 mkdir -p "$OUT_DIR"
 
 # Detect layout: new (per-step subdirs) or old (flat files)
@@ -88,7 +91,7 @@ for s in $STEPS; do
              file: input_filename
          }]
         | sort_by(-.reward)
-        | .[0:3]
+        | .[0:6]
         | to_entries
         | .[]
         | "\(.key+1)|\(.value.reward)|\(.value.group)|\(.value.rollout)|\(.value.valid)|\(.value.msg)|\(.value.file)"
