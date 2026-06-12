@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Compare OpenEvolve vs TTT vs TTT+Elo on circle_packing.
+Compare OpenEvolve (one or more models) vs TTT vs TTT+Elo on circle_packing.
 
-  - OpenEvolve : dense best-so-far curve parsed from the log, sampled every --every iterations.
-  - TTT        : one point per step, placed at iteration (step+1)*STEP_ITERS.
+  - OpenEvolve : dense best-so-far curve(s) parsed from log(s), sampled every --every.
+                 One curve per model, each its own legend entry.
+  - TTT        : one point per step at iteration (step+1)*STEP_ITERS.
   - TTT + Elo  : same.
 
 Usage:
-    python plot_best_curve.py                       # newest openevolve log + the TTT lists below
-    python plot_best_curve.py path/to.log --every 32 --ylim 2.4 2.65 --target 2.635
-    python plot_best_curve.py path/to.log --no-openevolve   # only the TTT series
-    python plot_best_curve_openEvolve.py /work/mohammad/TTT-local/openevolve/examples/circle_packing/openevolve_output/logs/openevolve_20260611_184912.log --every 64 --target 2.635
+    python plot_best_curve.py                                  # newest log (labeled TTT_MODEL) + TTT lists
+    python plot_best_curve.py --oe Qwen3-8B=logs/qwen.log --oe Llama3-8B=logs/llama.log
+    python plot_best_curve.py logs/qwen.log --ttt-model Qwen3-8B --ylim 2.45 2.66 --target 2.635
+    python plot_best_curve.py --no-openevolve                  # just TTT vs Elo
 """
 
 import argparse
@@ -25,12 +26,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ============================ hyperparameters ============================
-SAMPLE_EVERY = 32      # openevolve: plot one point every N iterations
+SAMPLE_EVERY = 64      # openevolve: plot one point every N iterations
 STEP_ITERS   = 512     # iterations per TTT step (also the vertical-line spacing)
 TTT_CUMMAX   = False   # True => plot cumulative best-so-far for the TTT series too
+TTT_MODEL    = "Qwen3-8B"   # model used for the TTT / TTT+Elo runs below
 YLIM = None            # e.g. (2.4, 2.65); None = autoscale
 XLIM = None            # e.g. (0, 7680); None = autoscale
-TARGET = None          # horizontal reference line; ~2.635 for n=26 unit-square packing
+TARGET = 2.635          # horizontal reference line; ~2.635 for n=26 unit-square packing
+
+# OpenEvolve runs to overlay: (model_label, log_or_json_path). path=None => newest in DEFAULT_LOG_DIR.
+# Add more models here, or pass them on the CLI with --oe LABEL=PATH.
+# OPENEVOLVE_RUNS = [
+#     ("Qwen3-8B", None),
+# ]
+
+OPENEVOLVE_RUNS = [
+    ("Qwen3-8B", '/work/mohammad/TTT-local/openevolve/examples/circle_packing/openevolve_output/logs/openevolve_20260611_184912-qwen8B.log'),
+    ("Qwen3-8B + Qwen3-32B", "/work/mohammad/TTT-local/openevolve/examples/circle_packing/openevolve_output/logs/openevolve_20260611_210406.log"),
+]
+
 
 # best sum_radii per step (step 0..14). Paste new runs here.
 TTT = [
@@ -46,6 +60,9 @@ TTT_ELO = [
 # =========================================================================
 
 DEFAULT_LOG_DIR = "/work/mohammad/TTT-local/openevolve/examples/circle_packing/openevolve_output/logs"
+
+# distinct colors for OpenEvolve models (kept away from the TTT orange / Elo teal)
+OE_COLORS = ["#1f4e79", "#9467bd", "#8c564b", "#17becf", "#6a4c93", "#444444"]
 
 _ITER_RE = re.compile(r"- Iteration (\d+):.*completed")
 _SR_RE = re.compile(r"- Metrics:.*sum_radii=([0-9.]+)")
@@ -85,14 +102,30 @@ def best_so_far_curve(iters, srs, every):
     return grid[mask], cummax[idx[mask]]
 
 
+def newest_log():
+    cands = sorted(glob.glob(os.path.join(DEFAULT_LOG_DIR, "openevolve_*.log")),
+                   key=os.path.getmtime)
+    return cands[-1] if cands else None
+
+
+def split_oe(s, default_label):
+    """Parse a --oe / positional value of the form 'Label=path' or 'path'."""
+    if "=" in s:
+        label, path = s.split("=", 1)
+        return label, path
+    return default_label, s
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("log", nargs="?", help="openevolve .log or *_best_curve.json")
+    p.add_argument("log", nargs="?", help="single openevolve .log/.json (labeled with --ttt-model)")
+    p.add_argument("--oe", action="append", default=[], metavar="LABEL=PATH",
+                   help="openevolve run to overlay; repeatable")
     p.add_argument("--every", type=int, default=SAMPLE_EVERY)
     p.add_argument("--step-iters", type=int, default=STEP_ITERS, help="iterations per TTT step")
-    p.add_argument("--ttt-cummax", action="store_true", default=TTT_CUMMAX,
-                   help="plot cumulative best-so-far for the TTT series")
-    p.add_argument("--no-openevolve", action="store_true", help="skip the openevolve curve")
+    p.add_argument("--ttt-model", default=TTT_MODEL, help="model label for the TTT / TTT+Elo series")
+    p.add_argument("--ttt-cummax", action="store_true", default=TTT_CUMMAX)
+    p.add_argument("--no-openevolve", action="store_true")
     p.add_argument("--ylim", type=float, nargs=2, default=YLIM, metavar=("LO", "HI"))
     p.add_argument("--xlim", type=float, nargs=2, default=XLIM, metavar=("LO", "HI"))
     p.add_argument("--target", type=float, default=TARGET)
@@ -101,14 +134,22 @@ def main():
 
     si = args.step_iters
 
-    # resolve openevolve log
-    log = args.log
-    if log is None and not args.no_openevolve:
-        cands = sorted(glob.glob(os.path.join(DEFAULT_LOG_DIR, "openevolve_*.log")),
-                       key=os.path.getmtime)
-        log = cands[-1] if cands else None
-        if log is None:
-            args.no_openevolve = True
+    # ---- assemble the list of OpenEvolve runs: (label, path) ----
+    runs = []
+    if not args.no_openevolve:
+        for s in args.oe:
+            runs.append(split_oe(s, args.ttt_model))
+        if args.log:
+            runs.append(split_oe(args.log, args.ttt_model))
+        if not runs:
+            runs = list(OPENEVOLVE_RUNS)
+        # resolve None paths to the newest log
+        resolved = []
+        for label, path in runs:
+            path = path or newest_log()
+            if path is not None:
+                resolved.append((label, path))
+        runs = resolved
 
     fig, ax = plt.subplots(figsize=(9, 5))
 
@@ -118,12 +159,14 @@ def main():
     for xb in range(si, int(xmax) + 1, si):
         ax.axvline(xb, color="0.8", ls="--", lw=0.8, zorder=0)
 
-    # openevolve dense curve
-    if not args.no_openevolve and log is not None:
-        iters, srs = parse_json(log) if log.endswith(".json") else parse_log(log)
-        if iters.size:
-            gx, gy = best_so_far_curve(iters, srs, args.every)
-            ax.plot(gx, gy, lw=1, color="#1f4e79", label="OpenEvolve", zorder=2)
+    # OpenEvolve dense curves, one per model
+    for i, (label, path) in enumerate(runs):
+        iters, srs = parse_json(path) if path.endswith(".json") else parse_log(path)
+        if iters.size == 0:
+            continue
+        gx, gy = best_so_far_curve(iters, srs, args.every)
+        ax.plot(gx, gy, lw=1.5, color=OE_COLORS[i % len(OE_COLORS)],
+                label=f"OpenEvolve ({label})", zorder=2)
 
     # TTT series: one point per step at x = (step+1)*step_iters
     def add_series(values, color, label):
@@ -133,8 +176,8 @@ def main():
         x = (np.arange(len(y)) + 1) * si
         ax.plot(x, y, marker="o", ms=5, lw=1.5, color=color, label=label, zorder=3)
 
-    add_series(TTT, "#e07b39", "TTT")
-    add_series(TTT_ELO, "#2a9d8f", "TTT + Elo")
+    add_series(TTT, "#e07b39", f"TTT ({args.ttt_model})")
+    add_series(TTT_ELO, "#2a9d8f", f"TTT + Elo ({args.ttt_model})")
 
     if args.target is not None:
         ax.axhline(args.target, ls="--", lw=1, color="#aa3333", zorder=1,
@@ -150,11 +193,12 @@ def main():
     if args.xlim:
         ax.set_xlim(*args.xlim)
 
-    out = args.out or (os.path.join(os.path.dirname(log) if log else ".",
-                                    "compare_best.png"))
+    out_dir = os.path.dirname(runs[0][1]) if runs else "."
+    out = args.out or os.path.join(out_dir, "compare_best.png")
     fig.tight_layout()
     fig.savefig(out, dpi=150)
-    print(f"steps: TTT={len(TTT)}, TTT+Elo={len(TTT_ELO)}, step_iters={si}")
+    print("openevolve runs: " + (", ".join(f"{l}" for l, _ in runs) or "(none)"))
+    print(f"TTT model: {args.ttt_model} | steps: {len(TTT)} / {len(TTT_ELO)} | step_iters: {si}")
     print(f"wrote {out}")
 
 

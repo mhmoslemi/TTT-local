@@ -1,3 +1,6 @@
+# sh best_curve_openEvolve.sh /work/mohammad/TTT-local/openevolve/examples/circle_packing/openevolve_output/logs/openevolve_20260611_184912.log 512
+
+
 #!/bin/sh
 # Parse an OpenEvolve circle_packing log into a best-so-far sum_radii curve.
 # Usage:
