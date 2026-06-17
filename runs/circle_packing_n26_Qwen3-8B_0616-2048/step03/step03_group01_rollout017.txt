@@ -1,0 +1,171 @@
+<strategy>
+To improve the circle packing in the unit square for 26 circles, we need to consider a more sophisticated and optimized strategy than the initial hexagonal grid-based method. Here's a plan for improvement:
+
+1. **Initial Arrangement**: Use a **hexagonal packing** as the initial layout to ensure regular spacing of circles. However, this should be done with careful adjustment to fit within the unit square, ensuring all circles are within bounds and do not overlap.
+
+2. **Optimization Strategy**:
+   - Instead of using a simple hexagonal grid, we can start with a **hybrid** of hexagonal and **nested** patterns to allow for more compact packing.
+   - Use a combination of **SLSQP** (Sequential Least Squares Programming) and **gradient-based optimization** to maximize the sum of radii.
+   - Add **multi-start optimization** with randomized initial configurations to avoid local maxima.
+
+3. **Boundary Utilization**:
+   - Improve the placement near the boundaries of the unit square by allowing larger radii for circles near edges.
+   - Use **adaptive boundary constraints** that can dynamically encourage larger radii by penalizing smaller radii near the square edges.
+
+4. **Overlapping Penalty Function**:
+   - Introduce a more refined **penalty function** that not only penalizes overlapping but also encourages tighter packing without violating constraints.
+
+5. **Constraint Handling**:
+   - Use **equality constraints** for strict non-overlap and boundary conditions to ensure the solution is valid.
+
+6. **Initialization Strategy**:
+   - Use a **randomized hexagonal grid** for initial positions to avoid bias towards specific configurations.
+   - Allow the radii to be initialized with higher values to provide more room for optimization.
+
+7. **Validation and Tuning**:
+   - Use the provided `validate_packing` function to ensure the final configuration is valid.
+   - Add **tuning of penalty coefficients** to balance the trade-off between maximizing the sum of radii and maintaining constraint satisfaction.
+
+These approaches ensure we have a robust and optimized packing strategy that maximizes the sum of radii while strictly adhering to the constraints.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+from typing import Tuple, List, Any
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def generate_hexagonal_initial_centers(n_circles):
+    # Generate a hexagonal grid with adjusted spacing and normalization
+    centers = []
+    r = 0.15  # Initial radius for spacing
+    for i in range(n_circles):
+        row = i // 5
+        col = i % 5
+        x = col * (r * 2) + 0.5 * r
+        y = row * (r * np.sqrt(3)) + 0.5 * r
+        # Random small perturbation to avoid symmetry
+        x += np.random.uniform(-0.05, 0.05)
+        y += np.random.uniform(-0.05, 0.05)
+        centers.append([x, y])
+    centers = np.array(centers)
+    # Normalize to unit square
+    centers /= np.max(centers)
+    return centers
+
+def objective_function(params, n_circles, penalty_coefficients):
+    centers = params[:n_circles * 2].reshape((n_circles, 2))
+    radii = params[n_circles * 2:].reshape((n_circles,))
+
+    radius_penalty = np.sum(np.maximum(0, -radii)) * 1000
+
+    # Boundary penalty: encourage larger radii near edges
+    edge_penalty = 0
+    for i in range(n_circles):
+        r = radii[i]
+        # Penalize small radii near edges
+        edge_penalty += np.maximum(0, r - (1 - np.abs(centers[i, 0])) - 1e-12)
+        edge_penalty += np.maximum(0, r - (1 - np.abs(centers[i, 1])) - 1e-12)
+
+    # Overlap penalty: encourage tighter packing
+    overlap_penalty = 0
+    for i in range(n_circles):
+        for j in range(i + 1, n_circles):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                overlap_penalty += (radii[i] + radii[j] - dist) * penalty_coefficients[0]
+
+    # Edge boundary penalty: penalize circles going outside the square
+    boundary_penalty = 0
+    for i in range(n_circles):
+        x, y = centers[i]
+        r = radii[i]
+        if x - r < -1e-12 or x + r > 1 + 1e-12:
+            boundary_penalty += 1000 * (np.abs(x - r) + np.abs(x + r - 1))
+        if y - r < -1e-12 or y + r > 1 + 1e-12:
+            boundary_penalty += 1000 * (np.abs(y - r) + np.abs(y + r - 1))
+    
+    total_penalty = radius_penalty + edge_penalty + overlap_penalty + boundary_penalty
+    return total_penalty
+
+def run_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    n_circles = 26
+    # Initial centers using a hexagonal pattern
+    initial_centers = generate_hexagonal_initial_centers(n_circles)
+    # Initial radii with small values
+    initial_radii = np.ones(n_circles) * 0.05
+
+    n_centers = n_circles * 2
+    n_radii = n_circles
+    bounds = [(0, 1) for _ in range(n_centers + n_radii)]
+
+    # Penalty coefficients
+    penalty_coefficients = [1.0, 0.1]  # overlap_penalty coefficient, edge_penalty coefficient
+
+    # Multi-start optimization
+    best_centers = None
+    best_radii = None
+    best_sum = 0
+
+    for _ in range(3):  # 3 different initializations
+        # Random perturbation to centers for varied starting points
+        perturbation = np.random.rand(n_centers) * 0.1
+        initial_params = np.concatenate([initial_centers.flatten() + perturbation, initial_radii])
+
+        result = optimize.minimize(
+            fun=lambda x: objective_function(x, n_circles, penalty_coefficients),
+            x0=initial_params,
+            bounds=bounds,
+            method="L-BFGS-B"
+        )
+
+        # Extract the optimal solution
+        optimal_params = result.x
+        centers_opt = optimal_params[:n_centers].reshape((n_circles, 2))
+        radii_opt = optimal_params[n_centers:].reshape((n_circles,))
+        sum_radii = np.sum(radii_opt)
+
+        # Validate the packing
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            print(f"Validation failed: {message}")
+            continue
+
+        # Update best result
+        if sum_radii > best_sum:
+            best_centers = centers_opt
+            best_radii = radii_opt
+            best_sum = sum_radii
+
+    # Final validation
+    is_valid, message = validate_packing(best_centers, best_radii)
+    if not is_valid:
+        print(f"Validation failed: {message}")
+        return np.array([]), np.array([]), 0.0
+
+    return best_centers, best_radii, best_sum
+```

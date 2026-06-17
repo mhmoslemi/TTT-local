@@ -1,0 +1,137 @@
+<strategy>
+To improve the circle packing in the unit square for 26 circles and achieve a sum of radii of at least 2.636, we can refine our approach by considering several enhancements:
+
+1. **Hexagonal Packing with Adaptive Placement**: The initial hexagonal grid is a good start, but it should be more adaptive and allow for more optimal placement of circles near boundaries. The grid should ideally be refined to fit the shape of the square while maintaining the hexagonal symmetry.
+
+2. **Randomized and Systematic Placement Near Boundaries**: Circles placed near corners and edges often have limited space, so a more systematic or probabilistic sampling of edge areas could help achieve better radii.
+
+3. **Use of Multiple Optimization Methods with Hybrid Strategy**: Instead of relying only on COBYLA and L-BFGS-B, a hybrid optimization strategy using genetic algorithms, simulated annealing, or even a combination with constraint-based solvers could lead to better results.
+
+4. **Refined Initial Estimation of Radii**: Instead of using a single minimal distance to estimate the initial radii, we can use a more sophisticated method like a greedy packing algorithm to estimate initial radii.
+
+5. **Use of CVXPY for Constraint-Based Optimization**: CVXPY can be used to enforce the non-overlapping and boundary constraints directly in a convex optimization problem. This approach can yield better global optimizations and more accurate solutions.
+
+6. **Gap Analysis and Repositioning**: After generating an initial packing, we can analyze the gaps between circles and reposition or resize circles to better utilize space.
+
+We'll implement a combination of these ideas in the `run_packing` function. We'll first create a more adaptive grid, use a hybrid optimization strategy with different solvers, and perform constraint-based optimization using CVXPY.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import cvxpy as cp
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def run_packing():
+    num_circles = 26
+    centers = np.zeros((num_circles, 2))
+    radii = np.zeros(num_circles)
+
+    # Step 1: Generate an adaptive hexagonal grid
+    ideal_rows = int(np.ceil(np.sqrt(num_circles)))
+    ideal_cols = int(np.ceil(num_circles / ideal_rows))
+    row_spacing = 1.0 / ideal_rows
+    col_spacing = 1.0 / ideal_cols
+
+    idx = 0
+    for i in range(ideal_rows):
+        for j in range(ideal_cols):
+            if idx >= num_circles:
+                break
+            if i % 2 == 0:
+                x = j * col_spacing + 0.5 * col_spacing
+            else:
+                x = (j + 0.5) * col_spacing
+            y = i * row_spacing + 0.5 * row_spacing
+            centers[idx] = [x, y]
+            idx += 1
+
+    # Step 2: Add circles near corners and edges
+    if idx < num_circles:
+        edge_positions = [
+            [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+            [0.1, 0.5], [0.5, 0.1], [0.5, 0.9], [0.9, 0.5]
+        ]
+        for pos in edge_positions:
+            if idx < num_circles:
+                centers[idx] = pos
+                idx += 1
+
+    # Step 3: Add remaining circles with more refined random positions
+    if idx < num_circles:
+        remaining = num_circles - idx
+        random_centers = np.random.rand(remaining, 2)
+        random_centers = (random_centers * 2 - 1) * 0.5 + 0.5  # Scale to [0,1]
+        centers[idx:] = random_centers
+
+    # Step 4: Set initial radii with greedy approach
+    dist_matrix = np.zeros((num_circles, num_circles))
+    for i in range(num_circles):
+        for j in range(i + 1, num_circles):
+            dist_matrix[i, j] = np.linalg.norm(centers[i] - centers[j])
+            dist_matrix[j, i] = dist_matrix[i, j]
+
+    min_dist = np.min(dist_matrix[dist_matrix > 0])
+    radii_initial = np.full(num_circles, min_dist / 2)
+
+    # Define optimization variables
+    c = cp.Variable((num_circles, 2))
+    r = cp.Variable(num_circles, non_negative=True)
+
+    # Constraints
+    constraints = []
+    for i in range(num_circles):
+        constraints.append(cp.sum_squares(c[i, 0] - 0.5) + cp.sum_squares(c[i, 1] - 0.5) <= (r[i] + 0.5) ** 2)
+        constraints.append(cp.sum_squares(c[i, 0] - 0.5) + cp.sum_squares(c[i, 1] + 0.5) <= (r[i] + 0.5) ** 2)
+        constraints.append(cp.sum_squares(c[i, 0] + 0.5) + cp.sum_squares(c[i, 1] - 0.5) <= (r[i] + 0.5) ** 2)
+        constraints.append(cp.sum_squares(c[i, 0] + 0.5) + cp.sum_squares(c[i, 1] + 0.5) <= (r[i] + 0.5) ** 2)
+        constraints.append(0 <= c[i, 0] <= 1)
+        constraints.append(0 <= c[i, 1] <= 1)
+
+    for i in range(num_circles):
+        for j in range(i + 1, num_circles):
+            dist = cp.norm(c[i] - c[j])
+            constraints.append(dist >= r[i] + r[j] - 1e-12)
+
+    # Objective function
+    obj = cp.Maximize(cp.sum(r))
+
+    # Solve the optimization problem
+    prob = cp.Problem(obj, constraints)
+    prob.solve(solver=cp.OSQP, eps=1e-6, verbose=False)
+
+    # Extract the optimal solution
+    centers_final = c.value
+    radii_final = r.value
+
+    # Validate the solution
+    is_valid, message = validate_packing(centers_final, radii_final)
+    assert is_valid, message
+
+    sum_radii = np.sum(radii_final)
+    return centers_final, radii_final, sum_radii
+```

@@ -1,0 +1,162 @@
+<strategy>
+To improve upon the given packing, we will focus on enhancing the initial configuration and optimization process. Here's a step-by-step strategy:
+
+1. **Improved Initial Placement**:
+   - The current initial placement assumes a regular hexagonal grid, which might not be optimal for a unit square with 26 circles.
+   - We will use a more refined hexagonal packing pattern that accounts for the unit square boundaries and starts with a higher density of circles near the center.
+
+2. **Better Initialization of Radii**:
+   - Instead of using the minimal distance between any two circles as the base for radii, we could estimate the initial radius more smartly. One approach is to use a fixed radius that allows for non-overlapping and fits comfortably within the square, then adjust based on distances.
+
+3. **Optimization Method**:
+   - We will use a combination of global and local optimization methods:
+     - **COBYLA** for global search to avoid local optima.
+     - **L-BFGS-B** for local refinement to maximize the sum of radii.
+
+4. **Refined Constraints and Bounds**:
+   - Ensure the bounds are tight and include all circles' positions and radii.
+   - Use a higher precision tolerance to allow for better convergence.
+
+5. **Use of Advanced Packing Patterns**:
+   - Instead of just a simple hexagonal packing, consider hybrid or nested layouts, where some circles are packed tightly in the center and others are placed near the boundaries to utilize the available space more efficiently.
+
+6. **Post-Optimization Checks**:
+   - Implement a final check to ensure all circles are within the square and no overlaps occur.
+
+By following these strategies, we can create a more efficient packing that potentially achieves the target sum of radii of 2.636 or higher.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def run_packing():
+    num_circles = 26
+    min_radius = 0.01  # Minimum radius for non-zero circles
+
+    # Step 1: Improved initial placement using a refined hexagonal grid
+    # We start with a dense hexagonal packing in the center of the unit square
+    ideal_rows = int(np.ceil(np.sqrt(num_circles)))
+    ideal_cols = int(np.ceil(num_circles / ideal_rows))
+    row_spacing = 1.0 / (ideal_rows + 1)
+    col_spacing = 1.0 / (ideal_cols + 1)
+
+    # Create a hexagonal grid centered in the unit square
+    centers = np.zeros((num_circles, 2))
+    idx = 0
+    for i in range(ideal_rows):
+        for j in range(ideal_cols):
+            if idx >= num_circles:
+                break
+            if i % 2 == 0:
+                x = j * col_spacing + 0.5 * col_spacing
+            else:
+                x = (j + 0.5) * col_spacing
+            y = i * row_spacing + 0.5 * row_spacing
+            centers[idx] = [x, y]
+            idx += 1
+
+    # Add circles near corners and edges to optimize boundary usage
+    if idx < num_circles:
+        edge_positions = [
+            [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+            [0.1, 0.5], [0.5, 0.1], [0.5, 0.9], [0.9, 0.5]
+        ]
+        for pos in edge_positions:
+            if idx < num_circles:
+                centers[idx] = pos
+                idx += 1
+
+    # Add remaining random circles near corners and edges
+    if idx < num_circles:
+        remaining = num_circles - idx
+        random_centers = np.random.rand(remaining, 2)
+        random_centers = (random_centers * 2 - 1) * 0.5 + 0.5  # Scale to [0, 1]
+        centers[idx:] = random_centers
+
+    # Step 2: Estimate initial radii based on dense packing
+    # Use a radius that allows the circles to fit closely without overlap
+    # Start with a minimum radius and increase based on distance to nearby circles
+    radii = np.full(num_circles, min_radius)
+    for i in range(num_circles):
+        for j in range(i + 1, num_circles):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist > 0:
+                radii[i] = min(radii[i], dist / 2.0)
+                radii[j] = min(radii[j], dist / 2.0)
+
+    # Step 3: Optimize the configuration
+    def objective(x):
+        centers_flat = x[:2 * num_circles].reshape(num_circles, 2)
+        radii_flat = x[2 * num_circles:].reshape(num_circles)
+
+        is_valid, _ = validate_packing(centers_flat, radii_flat)
+        if not is_valid:
+            return float('inf')
+
+        return -np.sum(radii_flat)
+
+    # Bounds: centers in [0,1] and radii non-negative
+    center_bounds = [(0.0, 1.0) for _ in range(2 * num_circles)]
+    radius_bounds = [(0.0, 1.0) for _ in range(num_circles)]
+    bounds = center_bounds + radius_bounds
+
+    # Initial guess
+    x0 = np.concatenate((centers.flatten(), radii))
+
+    # Optimization: COBYLA for global search, L-BFGS-B for local refinement
+    result_co = opt.minimize(
+        objective,
+        x0,
+        method='COBYLA',
+        bounds=bounds,
+        tol=1e-8,
+        options={'maxiter': 500, 'disp': False}
+    )
+
+    result_bfgs = opt.minimize(
+        objective,
+        result_co.x,
+        method='L-BFGS-B',
+        bounds=bounds,
+        tol=1e-10,
+        options={'maxiter': 300, 'disp': False}
+    )
+
+    # Extract final centers and radii
+    centers_final = result_bfgs.x[:2 * num_circles].reshape(num_circles, 2)
+    radii_final = result_bfgs.x[2 * num_circles:].reshape(num_circles)
+
+    # Validate the final configuration
+    assert validate_packing(centers_final, radii_final)[0], "Final configuration is invalid"
+
+    # Compute the total sum of radii
+    sum_radii = np.sum(radii_final)
+
+    return centers_final, radii_final, sum_radii
+```

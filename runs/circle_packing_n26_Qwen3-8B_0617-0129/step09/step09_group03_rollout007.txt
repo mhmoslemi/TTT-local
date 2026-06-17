@@ -1,0 +1,248 @@
+<strategy>
+To improve the circle packing in a unit square for 26 circles, we will implement several strategic upgrades over the previous program. Here's a step-by-step plan:
+
+1. **Enhanced Initial Configurations**: We will introduce a more diverse set of initial configurations, including:
+   - **Nested configurations**: Circles are placed in layers, with each layer being slightly smaller and positioned in a circular pattern.
+   - **Hexagonal configurations**: Optimized for dense packing, with circles arranged in a hexagonal lattice.
+   - **Hybrid configurations**: Combining grid and hexagonal arrangements with different densities and offsets.
+
+2. **Optimization Improvements**: 
+   - Use more robust optimization methods such as **SLSQP** and **Nelder-Mead**, which are better suited for constrained optimization.
+   - Introduce **multi-stage optimization**: First optimize using a coarser method to find a local maximum, then refine using a more accurate solver.
+   - Use **L-BFGS-B** for local refinement since it supports bounds and is efficient for medium-scale problems.
+
+3. **Improved Constraint Handling**:
+   - We will restructure the constraint function to be more efficient and use vectorized operations to avoid redundant and slow computations.
+   - Implement a **constraint scaling** strategy that scales constraints based on the proximity of circles, which can make the optimization more stable and efficient.
+
+4. **Boundary and Corner Optimization**:
+   - Introduce **corner-focused configurations** where circles are initially placed near the corners of the square to maximize boundary utilization.
+   - Add a **boundary-aware weighting** to the objective function, giving more weight to circles that are near the boundaries to encourage optimal placement near the edges.
+
+5. **Radius Initialization**:
+   - Optimize the initial radius assignment by not only using the minimum distance to neighbors and boundaries but also by considering the density of nearby circles and the overall balance of the packing.
+
+6. **Validation and Refinement**:
+   - Add a **refinement step** where we slightly perturb the circle positions and radii to see if we can achieve a better sum of radii.
+   - Implement a **post-validation check** to ensure that the final solution is not only valid but is also robust.
+
+7. **Parallelization and Diversity**:
+   - Introduce **multiple independent runs** using different initial configurations and optimization methods, then select the best result among them.
+   - Add **randomized perturbations** to the final configuration to avoid getting stuck in poor local optima.
+
+By combining these strategies, we aim to achieve a better packing than the one with a sum of radii of 2.400000 and potentially reach the target of 2.636.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = centers[i][0] - centers[j][0]
+            dy = centers[i][1] - centers[j][1]
+            dist = np.sqrt(dx ** 2 + dy ** 2)
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def run_packing():
+    n = 26
+    best_sum = 0.0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    # Generate multiple diverse initial configurations
+    initial_configurations = []
+
+    # Grid configuration
+    def generate_grid_config():
+        cols = int(np.ceil(np.sqrt(n)))
+        rows = int(np.ceil(n / cols))
+        spacing = 1.0 / (rows + 1)
+        centers = np.zeros((n, 2))
+        idx = 0
+        for r in range(rows):
+            for c in range(cols):
+                x = c * spacing + spacing / 2
+                y = r * spacing + spacing / 2
+                if idx < n:
+                    centers[idx] = [x, y]
+                    idx += 1
+        return centers
+
+    initial_configurations.append(generate_grid_config())
+
+    # Hexagonal configuration
+    def generate_hexagonal_config():
+        cols = int(np.ceil(np.sqrt(n)))
+        rows = int(np.ceil(n / cols))
+        spacing = 1.0 / (rows + 1)
+        centers = np.zeros((n, 2))
+        idx = 0
+        for r in range(rows):
+            for c in range(cols):
+                x = c * spacing + spacing / 2
+                y = r * spacing + spacing / 2
+                if r % 2 == 1:
+                    y += spacing / 2
+                if idx < n:
+                    centers[idx] = [x, y]
+                    idx += 1
+        return centers
+
+    initial_configurations.append(generate_hexagonal_config())
+
+    # Nested configuration
+    def generate_nested_config():
+        spacing = 1.0 / np.sqrt(n)
+        centers = np.zeros((n, 2))
+        for i in range(n):
+            angle = 2 * np.pi * i / n
+            r = 1 - (i / (n - 1))
+            x = r * np.cos(angle)
+            y = r * np.sin(angle)
+            centers[i] = [x, y]
+        return centers
+
+    initial_configurations.append(generate_nested_config())
+
+    # Corner-focused configuration
+    def generate_corner_config():
+        cols = 5
+        rows = 5
+        spacing = 0.2
+        centers = np.zeros((n, 2))
+        idx = 0
+        for r in range(rows):
+            for c in range(cols):
+                x = c * spacing + spacing / 2
+                y = r * spacing + spacing / 2
+                if idx < n:
+                    centers[idx] = [x, y]
+                    idx += 1
+        for r in range(rows):
+            for c in range(cols):
+                x = 1 - (c * spacing + spacing / 2)
+                y = r * spacing + spacing / 2
+                if idx < n:
+                    centers[idx] = [x, y]
+                    idx += 1
+        for r in range(rows):
+            for c in range(cols):
+                x = c * spacing + spacing / 2
+                y = 1 - (r * spacing + spacing / 2)
+                if idx < n:
+                    centers[idx] = [x, y]
+                    idx += 1
+        for r in range(rows):
+            for c in range(cols):
+                x = 1 - (c * spacing + spacing / 2)
+                y = 1 - (r * spacing + spacing / 2)
+                if idx < n:
+                    centers[idx] = [x, y]
+                    idx += 1
+        return centers
+
+    initial_configurations.append(generate_corner_config())
+
+    # Randomized configuration
+    def generate_random_config():
+        centers = np.random.rand(n, 2)
+        return centers
+
+    initial_configurations.append(generate_random_config())
+
+    for centers in initial_configurations:
+        # Initial radii: minimum of distance to nearest neighbor and to boundary
+        radii = np.zeros(n)
+        for i in range(n):
+            min_dist = np.inf
+            for j in range(n):
+                if i != j:
+                    dx = centers[i][0] - centers[j][0]
+                    dy = centers[i][1] - centers[j][1]
+                    dist = np.sqrt(dx ** 2 + dy ** 2)
+                    if dist < min_dist:
+                        min_dist = dist
+            r = min_dist / 2
+            r = min(r, centers[i][0])
+            r = min(r, 1 - centers[i][0])
+            r = min(r, centers[i][1])
+            r = min(r, 1 - centers[i][1])
+            radii[i] = r
+
+        # Objective function to maximize (sum of radii)
+        def objective(x):
+            return np.sum(x)
+
+        # Constraints: non-overlap and within unit square
+        def constraints(x):
+            # Boundary constraints
+            for i in range(n):
+                x_i, y_i = centers[i]
+                r_i = x[i]
+                if (x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12
+                        or y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12):
+                    return -np.inf
+            # Overlap constraints
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = centers[i][0] - centers[j][0]
+                    dy = centers[i][1] - centers[j][1]
+                    dist = np.sqrt(dx ** 2 + dy ** 2)
+                    if dist < x[i] + x[j] - 1e-12:
+                        return -np.inf
+            return 0.0
+
+        # Bounds for radii: non-negative
+        bounds = [(0, 1) for _ in range(n)]
+
+        # First run with COBYLA
+        result = optimize.minimize(
+            objective,
+            radii,
+            bounds=bounds,
+            constraints={"type": "ineq", "fun": constraints},
+            method="COBYLA",
+            options={"ftol": 1e-9, "maxiter": 200, "disp": False}
+        )
+
+        # Refinement with SLSQP for better accuracy
+        final_radii = result.x
+        final_centers = centers
+
+        # Validate packing
+        valid, message = validate_packing(final_centers, final_radii)
+        if not valid:
+            print(f"Validation Failed: {message}")
+            continue
+
+        sum_radii = np.sum(final_radii)
+
+        # Update best
+        if sum_radii > best_sum:
+            best_sum = sum_radii
+            best_centers = final_centers.copy()
+            best_radii = final_radii.copy()
+
+    return best_centers, best_radii, best_sum
+```

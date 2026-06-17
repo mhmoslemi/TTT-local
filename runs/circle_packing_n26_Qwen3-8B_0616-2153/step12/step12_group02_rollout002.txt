@@ -1,0 +1,297 @@
+<strategy>
+To achieve a better packing of 26 circles in a unit square with a target sum of radii of 2.636, I will refine the strategy by introducing several key improvements to the current packing approach:
+
+1. **Improved Initial Configurations**: Instead of generating centers based on a simple hexagonal or random grid, I will employ more adaptive generation strategies. This includes:
+   - Using hybrid configurations, such as combining hexagonal and random placements.
+   - Incorporating geometric constraints from optimal circle packings in a square (e.g., known configurations).
+   - Adding additional corner and edge placements to maximize utilization of boundary space.
+
+2. **Enhanced Optimization**: To improve convergence and avoid local minima, I will refine the optimization process:
+   - Introduce a multi-phase optimization: a global optimization phase (e.g., genetic algorithm or simulated annealing) for initial placement, followed by a local optimization with SLSQP.
+   - Increase the number of initial seeds for better exploration of the search space.
+   - Incorporate adaptive cooling schedules for simulated annealing to better avoid local traps in the configuration space.
+
+3. **Better Initialization of Radii**: I will initialize circle radii not just based on distance to the boundary, but also considering the proximity to other circles. This will help in creating a more balanced packing from the start.
+
+4. **Improved Constraint Handling**: I will reformulate constraints to be more numerically robust and ensure that overlapping and boundary violations are handled more precisely during optimization.
+
+5. **Post-Optimization Refinement**: Add post-optimization steps where we try slight perturbations to centers and radii in a valid region to potentially find better configurations.
+
+6. **Advanced Packing Strategy**: Instead of relying on a single fixed generation method, I will use a more dynamic configuration approach based on known or heuristic placements, such as:
+   - A hybrid packing of hexagonal structures in the center with random or adaptive placement near boundaries.
+   - Adding extra circles in corners and edges that have more space for expansion.
+
+7. **Validation and Error Handling**: I will include tighter validation checks and error handling to catch issues like overlapping or boundary violations more effectively.
+
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+import random
+from typing import Tuple, List, Any
+
+def run_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    def validate_packing(centers, radii):
+        n = centers.shape[0]
+
+        if np.isnan(centers).any() or np.isnan(radii).any():
+            return False, "NaN values present"
+
+        for i in range(n):
+            if radii[i] < 0:
+                return False, f"Circle {i} has negative radius {radii[i]}"
+
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            if (x - r < -1e-12 or x + r > 1 + 1e-12
+                    or y - r < -1e-12 or y + r > 1 + 1e-12):
+                return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return False, f"Circles {i} and {j} overlap"
+
+        return True, "ok"
+
+    def objective_function(params, n_circles):
+        centers = params[:n_circles * 2].reshape((n_circles, 2))
+        radii = params[n_circles * 2:].reshape((n_circles,))
+        return -np.sum(radii)
+
+    def constraint_function(params, n_circles):
+        centers = params[:n_circles * 2].reshape((n_circles, 2))
+        radii = params[n_circles * 2:].reshape((n_circles,))
+
+        constraints = []
+
+        # Boundary constraints
+        for i in range(n_circles):
+            x, y = centers[i]
+            r = radii[i]
+            constraints.append((1 - x - r) * 1e4)
+            constraints.append((x - r) * 1e4)
+            constraints.append((1 - y - r) * 1e4)
+            constraints.append((y - r) * 1e4)
+
+        # Circle-circle constraints
+        for i in range(n_circles):
+            for j in range(i + 1, n_circles):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                constraints.append((dist - (radii[i] + radii[j])) * 1e4)
+
+        return constraints
+
+    def generate_hexagonal_centers(n_circles, margin=0.1):
+        centers = []
+        grid_rows = int((1 - 2 * margin) / (0.25 * np.sqrt(3)))
+        grid_cols = int((1 - 2 * margin) / 0.25)
+        for i in range(grid_rows):
+            for j in range(grid_cols):
+                x = j * 0.25 + margin
+                y = i * 0.25 * np.sqrt(3) + margin
+                if (x <= 1 - margin and y <= 1 - margin and x >= margin and y >= margin):
+                    centers.append([x, y])
+        return np.array(centers)
+
+    def generate_corner_centers(n_circles, margin=0.1):
+        corners = [(margin, margin), (1 - margin, margin), (margin, 1 - margin), (1 - margin, 1 - margin)]
+        centers = []
+        for _ in range(n_circles):
+            x = np.random.choice([margin, 1 - margin])
+            y = np.random.choice([margin, 1 - margin])
+            centers.append([x, y])
+        return np.array(centers)
+
+    def generate_random_centers(n_circles, margin=0.1):
+        centers = []
+        for _ in range(n_circles):
+            x = np.random.uniform(margin, 1 - margin)
+            y = np.random.uniform(margin, 1 - margin)
+            centers.append([x, y])
+        return np.array(centers)
+
+    def combine_centers(hex_centers, random_centers, corner_centers, n_circles):
+        combined = np.vstack([hex_centers, random_centers, corner_centers])
+        if combined.shape[0] > n_circles:
+            combined = combined[:n_circles]
+        return combined
+
+    def optimize_packing(n_circles, method="SLSQP", seed=None):
+        if seed is not None:
+            np.random.seed(seed)
+
+        # Generate initial centers with different configurations
+        hex_centers = generate_hexagonal_centers(n_circles)
+        random_centers = generate_random_centers(n_circles)
+        corner_centers = generate_corner_centers(n_circles)
+        initial_centers = combine_centers(hex_centers, random_centers, corner_centers, n_circles)
+
+        # Initialize radii with a better initial guess
+        radii = np.zeros(n_circles)
+        for i in range(n_circles):
+            x, y = initial_centers[i]
+            dist_to_boundary = min(x, 1 - x, y, 1 - y)
+            if dist_to_boundary > 0:
+                radii[i] = min(0.25, dist_to_boundary)
+
+        initial_params = np.concatenate([initial_centers.flatten(), radii])
+
+        bounds = []
+        for _ in range(n_circles * 2):
+            bounds.append((0, 1))
+        for _ in range(n_circles):
+            bounds.append((0, 0.5))
+
+        # First optimization run
+        result = optimize.minimize(
+            fun=lambda x: objective_function(x, n_circles),
+            x0=initial_params,
+            bounds=bounds,
+            constraints={"type": "ineq", "fun": lambda x: constraint_function(x, n_circles)},
+            method=method
+        )
+
+        centers_opt = result.x[:n_circles * 2].reshape((n_circles, 2))
+        radii_opt = result.x[n_circles * 2:].reshape((n_circles,))
+
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            print(f"Validation failed during optimization: {message}")
+            return np.array([]), np.array([])
+
+        centers, radii = centers_opt, radii_opt
+
+        # Fine-tuning phase
+        for _ in range(5):
+            new_centers = centers + np.random.uniform(-0.05, 0.05, centers.shape)
+            new_radii = radii + np.random.uniform(-0.01, 0.01, radii.shape)
+            is_valid, message = validate_packing(new_centers, new_radii)
+            if is_valid:
+                centers, radii = new_centers, new_radii
+
+        final_result = optimize.minimize(
+            fun=lambda x: objective_function(x, n_circles),
+            x0=np.concatenate([centers.flatten(), radii]),
+            bounds=bounds,
+            constraints={"type": "ineq", "fun": lambda x: constraint_function(x, n_circles)},
+            method=method
+        )
+
+        centers_opt = final_result.x[:n_circles * 2].reshape((n_circles, 2))
+        radii_opt = final_result.x[n_circles * 2:].reshape((n_circles,))
+
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            print(f"Final validation failed: {message}")
+            return np.array([]), np.array([])
+
+        return centers_opt, radii_opt
+
+    def simulated_annealing_packing(n_circles):
+        def objective_function(params):
+            centers = params[:n_circles * 2].reshape((n_circles, 2))
+            radii = params[n_circles * 2:].reshape((n_circles,))
+            return -np.sum(radii)
+
+        def constraint_function(params):
+            centers = params[:n_circles * 2].reshape((n_circles, 2))
+            radii = params[n_circles * 2:].reshape((n_circles,))
+            constraints = []
+
+            for i in range(n_circles):
+                x, y = centers[i]
+                r = radii[i]
+                constraints.append((1 - x - r))
+                constraints.append((x - r))
+                constraints.append((1 - y - r))
+                constraints.append((y - r))
+
+            for i in range(n_circles):
+                for j in range(i + 1, n_circles):
+                    dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                    constraints.append((dist - (radii[i] + radii[j])))
+
+            return constraints
+
+        def energy(params):
+            centers = params[:n_circles * 2].reshape((n_circles, 2))
+            radii = params[n_circles * 2:].reshape((n_circles,))
+            return -np.sum(radii)
+
+        def validate(params):
+            centers = params[:n_circles * 2].reshape((n_circles, 2))
+            radii = params[n_circles * 2:].reshape((n_circles,))
+            for i in range(n_circles):
+                x, y = centers[i]
+                r = radii[i]
+                if (x - r < -1e-12 or x + r > 1 + 1e-12
+                        or y - r < -1e-12 or y + r > 1 + 1e-12):
+                    return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+            for i in range(n_circles):
+                for j in range(i + 1, n_circles):
+                    dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                    if dist < radii[i] + radii[j] - 1e-12:
+                        return False, f"Circles {i} and {j} overlap"
+            return True, "ok"
+
+        params = np.random.uniform(0, 1, n_circles * 2 + n_circles)
+        best_params = params.copy()
+        best_energy = energy(best_params)
+        T = 1.0
+        cooling_rate = 0.995
+        iterations = 1000
+
+        for _ in range(iterations):
+            T *= cooling_rate
+            new_params = params + np.random.normal(0, 0.05, params.shape)
+            new_params = np.clip(new_params, 0, 1)
+            new_params[n_circles * 2:] = np.clip(new_params[n_circles * 2:], 0, 0.5)
+            is_valid, message = validate(new_params)
+            if is_valid:
+                new_energy = energy(new_params)
+                if new_energy < best_energy:
+                    best_energy = new_energy
+                    best_params = new_params.copy()
+                elif np.random.rand() < np.exp((best_energy - new_energy) / T):
+                    params = new_params.copy()
+        centers_opt = best_params[:n_circles * 2].reshape((n_circles, 2))
+        radii_opt = best_params[n_circles * 2:].reshape((n_circles,))
+        return centers_opt, radii_opt
+
+    n_circles = 26
+    best_centers = None
+    best_radii = None
+    best_sum = 0.0
+
+    # Multi-phase packing strategy
+    for seed in range(20):  # Try 20 different initial seeds
+        centers_opt, radii_opt = optimize_packing(n_circles, method="SLSQP", seed=seed)
+        if centers_opt.size == 0 or radii_opt.size == 0:
+            continue
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            continue
+        sum_radii = np.sum(radii_opt)
+        if sum_radii > best_sum:
+            best_centers = centers_opt
+            best_radii = radii_opt
+            best_sum = sum_radii
+
+    if best_centers is None or best_radii is None:
+        print("No valid packing found")
+        return np.array([]), np.array([]), 0.0
+
+    # Final refinement with simulated annealing
+    best_centers, best_radii = simulated_annealing_packing(n_circles)
+    is_valid, message = validate_packing(best_centers, best_radii)
+    if not is_valid:
+        print("Final validation failed")
+        return np.array([]), np.array([]), 0.0
+
+    sum_radii = np.sum(best_radii)
+    return best_centers, best_radii, sum_radii
+```

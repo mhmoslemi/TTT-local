@@ -1,0 +1,158 @@
+<strategy>
+To improve the packing of 26 circles in a unit square and achieve a total sum of radii of at least 2.636, we need a more sophisticated strategy. While the current approach is reasonable and provides a baseline of 2.2, we can enhance the packing through the following methods:
+
+1. **Optimized Initial Placement**: The initial guess for centers is not optimized. A more refined and evenly distributed initial guess using a hexagonal packing or a grid that respects the square boundaries can help the optimization converge to a better solution faster.
+
+2. **Better Radii Initialization**: Instead of initializing radii based on the minimum inter-circle distance, we can initialize them with a more dynamic approach. Perhaps using the distance to the nearest boundary, or using a combination of inter-circle and boundary distances.
+
+3. **Improved Optimization Strategy**: The current optimizer (SLSQP) is suitable but may not be the most effective for the high-dimensional and constrained problem of circle packing. Consider using a more robust global optimization method, such as particle swarm optimization (PSO) or differential evolution, to escape local optima.
+
+4. **Hybrid Packing Strategy**: Combining several packing strategies (e.g., hexagonal, nested, and boundary-adaptive) to better use the available space. For example, we can pack circles in a hexagonal grid in the center and use boundary positions for larger or specially placed circles.
+
+5. **Local Refinement**: After the global optimization, perform a local refinement step to fine-tune the positions and radii of the circles, especially those near boundaries or in dense areas.
+
+6. **Constraint Handling**: Use a tighter and more efficient constraint-handling approach to make the optimization more stable. Perhaps introducing a penalty function or a more effective constraint enforcement during optimization.
+
+7. **Repositioning and Filling Gaps**: Evaluate the final configuration for gaps and try to reposition circles to fill them. This can be done during the optimization or as a post-processing step.
+
+By incorporating these improvements, we can significantly enhance the packing efficiency and achieve higher total sum of radii.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import random
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def run_packing():
+    num_circles = 26
+
+    # Generate a hybrid initial guess using a hexagonal grid and boundary positions
+    centers = np.zeros((num_circles, 2))
+    idx = 0
+
+    # Hexagonal grid in the center
+    # We'll pack a hexagonal grid in the central area
+    for i in range(5):  # 5 rows
+        for j in range(6):  # 6 columns
+            if idx >= num_circles:
+                break
+            if i % 2 == 0:
+                x = j * 0.25 + 0.1
+            else:
+                x = (j + 0.5) * 0.25
+            y = i * 0.25 + 0.1
+            centers[idx] = [x, y]
+            idx += 1
+
+    # Add remaining circles near boundaries and corners
+    edge_positions = [
+        [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+        [0.1, 0.5], [0.5, 0.1], [0.5, 0.9], [0.9, 0.5],
+        [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+        [0.5, 0.25], [0.5, 0.75]
+    ]
+    for pos in edge_positions:
+        if idx < num_circles:
+            centers[idx] = pos
+            idx += 1
+
+    # Add remaining circles near the center with random perturbations
+    if idx < num_circles:
+        remaining = num_circles - idx
+        random_centers = np.random.rand(remaining, 2)
+        random_centers = (random_centers * 2 - 1) * 0.5 + 0.5  # Scale to [0, 1]
+        centers[idx:] = random_centers
+
+    # Compute initial radius estimates based on both inter-circle and boundary distances
+    min_inter_dist = np.inf
+    min_boundary_dist = np.inf
+    for i in range(num_circles):
+        x, y = centers[i]
+        max_r = min(x, 1 - x, y, 1 - y)
+        if max_r < min_boundary_dist:
+            min_boundary_dist = max_r
+        for j in range(i + 1, num_circles):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < min_inter_dist:
+                min_inter_dist = dist
+
+    radii = np.full(num_circles, min(min_inter_dist / 2.0, min_boundary_dist))
+
+    # Define objective function to maximize sum of radii
+    def objective(x):
+        centers_flat = x[:2 * num_circles].reshape(num_circles, 2)
+        radii_flat = x[2 * num_circles:].reshape(num_circles)
+
+        # Check if this configuration is valid
+        is_valid, _ = validate_packing(centers_flat, radii_flat)
+        if not is_valid:
+            return float('inf')
+
+        # Compute and return the negative objective (minimization)
+        return -np.sum(radii_flat)
+
+    # Define bounds for centers and radii
+    center_bounds = []
+    for _ in range(num_circles):
+        center_bounds.append((0.0, 1.0))
+        center_bounds.append((0.0, 1.0))
+
+    radius_bounds = []
+    for _ in range(num_circles):
+        radius_bounds.append((0.0, 0.5))  # Max radius is 0.5 to avoid overlap
+
+    bounds = center_bounds + radius_bounds
+
+    # Initial guess: use centers from the initial guess and uniform radii
+    x0 = np.concatenate((centers.flatten(), radii))
+
+    # Run optimization with differential evolution for global search
+    result = opt.differential_evolution(
+        objective,
+        bounds,
+        strategy='best1bin',
+        maxiter=150,
+        popsize=15,
+        tol=1e-9,
+        mutation=(0.5, 1),
+        recombination=0.8,
+        disp=False
+    )
+
+    # Extract the final centers and radii
+    centers_final = result.x[:2 * num_circles].reshape(num_circles, 2)
+    radii_final = result.x[2 * num_circles:].reshape(num_circles)
+
+    # Validate final configuration
+    assert validate_packing(centers_final, radii_final)[0], "Final configuration is invalid"
+
+    # Compute the total sum of radii
+    sum_radii = np.sum(radii_final)
+
+    return centers_final, radii_final, sum_radii
+```

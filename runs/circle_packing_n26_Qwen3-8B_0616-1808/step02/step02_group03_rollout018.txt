@@ -1,0 +1,193 @@
+<strategy>
+To improve the circle packing in the unit square, we need to consider an optimal arrangement that maximizes the sum of radii while respecting the non-overlapping and boundary constraints. A naive hexagonal grid arrangement is inefficient for a square geometry, especially with an arbitrary number of circles (26 in this case). Instead, we should consider a more flexible and adaptive packing strategy.
+
+### Key Improvements:
+1. **Dynamic Grid Layout:**  
+   Instead of using a fixed hexagonal grid, we can use a more flexible layout such as a grid-based packing with adjustments for spacing and proximity. We'll use a grid of points with variable spacing and then optimize the positions and radii of the circles to maximize the total radius sum.
+
+2. **Optimization Strategy:**  
+   The previous code used a simple L-BFGS-B optimizer with non-overlapping and boundary constraints. While this is reasonable for small problems, it can get stuck in local optima. One improvement is to use a more robust global optimization approach like **genetic algorithms** or **simulated annealing**, which can better explore the search space.
+
+3. **Boundary and Corner Optimization:**  
+   Circles near the corners and edges of the square should have special consideration. Placing larger circles in these positions can often lead to more efficient packing. To handle this, we can add a heuristic that biases the initial layout to prioritize placing larger circles near the corners.
+
+4. **Hybrid Packings:**  
+   A combination of hexagonal and square layouts can be more effective. In particular, using a **square packing** with variable spacing and radius adjustments can help fill in the gaps left by a hexagonal grid.
+
+5. **Parameter Tuning:**  
+   The initial guess of the centers and the number of rows/columns can significantly influence the packing. Using more rows and columns with smaller spacing often leads to better packing.
+
+6. **Radius-Position Interdependency:**  
+   Each circle's radius is closely tied to its position and neighbors. Therefore, a better objective function that balances the radii across the entire grid while ensuring they are as large as possible is essential.
+
+We'll implement a more sophisticated packing using the following steps:
+
+- Use a **grid layout** with spacing and radius adjustment.
+- Use a genetic algorithm (via `deap`) for global optimization.
+- Incorporate a heuristic for placing circles near the corners.
+- Add bounds and constraints for non-overlapping and boundary adherence.
+- Validate the final packing.
+
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import random
+from deap import base, creator, tools, algorithms
+
+def run_packing():
+    n_circles = 26
+
+    # Define a grid of points with variable spacing
+    grid_points = []
+    for i in range(7):
+        for j in range(7):
+            grid_points.append([i / 6, j / 6])
+    grid_points = np.array(grid_points)
+
+    # Randomly select n_circles points from the grid
+    np.random.shuffle(grid_points)
+    centers = grid_points[:n_circles]
+
+    # Initial guess for radii: all equal
+    radii = np.full(n_circles, 0.05)
+
+    # Function to calculate the sum of radii
+    def objective(x):
+        centers_opt = x[:n_circles * 2].reshape(n_circles, 2)
+        radii_opt = x[n_circles * 2:]
+        return -np.sum(radii_opt)  # Minimize negative sum to maximize
+
+    # Constraints
+    bounds = [(0, 1) for _ in range(n_circles * 2)] + [(0, 1) for _ in range(n_circles)]
+
+    # Non-overlap constraint function
+    def non_overlap(x):
+        centers_opt = x[:n_circles * 2].reshape(n_circles, 2)
+        radii_opt = x[n_circles * 2:]
+        for i in range(n_circles):
+            for j in range(i + 1, n_circles):
+                dx = centers_opt[i, 0] - centers_opt[j, 0]
+                dy = centers_opt[i, 1] - centers_opt[j, 1]
+                dist = np.sqrt(dx * dx + dy * dy)
+                if dist < radii_opt[i] + radii_opt[j] - 1e-8:
+                    return -1
+        return 0
+
+    # Boundary constraint function
+    def boundary(x):
+        centers_opt = x[:n_circles * 2].reshape(n_circles, 2)
+        radii_opt = x[n_circles * 2:]
+        for i in range(n_circles):
+            x_i, y_i = centers_opt[i]
+            r_i = radii_opt[i]
+            if (x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12
+                or y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12):
+                return -1
+        return 0
+
+    # Define the optimization problem for genetic algorithm
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    toolbox.register("attr_center_x", lambda: np.random.uniform(0, 1))
+    toolbox.register("attr_center_y", lambda: np.random.uniform(0, 1))
+    toolbox.register("attr_radius", lambda: np.random.uniform(0.01, 0.2))
+
+    def individual():
+        centers = [toolbox.attr_center_x(), toolbox.attr_center_y() for _ in range(n_circles)]
+        radii = [toolbox.attr_radius() for _ in range(n_circles)]
+        return centers + radii
+
+    toolbox.register("individual", individual, n_circles=n_circles)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    # Objective function for genetic algorithm
+    def eval_func(individual):
+        centers_opt = individual[:n_circles * 2]
+        centers_opt = centers_opt.reshape(n_circles, 2)
+        radii_opt = individual[n_circles * 2:]
+        # Check for overlaps
+        for i in range(n_circles):
+            for j in range(i + 1, n_circles):
+                dx = centers_opt[i, 0] - centers_opt[j, 0]
+                dy = centers_opt[i, 1] - centers_opt[j, 1]
+                dist = np.sqrt(dx * dx + dy * dy)
+                if dist < radii_opt[i] + radii_opt[j] - 1e-8:
+                    return -np.inf  # Penalize overlaps
+        # Check for boundary violations
+        for i in range(n_circles):
+            x, y = centers_opt[i]
+            r = radii_opt[i]
+            if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+                return -np.inf  # Penalize boundary violations
+        # Return the negative of the sum of radii to maximize
+        return -np.sum(radii_opt)
+
+    toolbox.register("evaluate", eval_func)
+    toolbox.register("mate", tools.cxTwoPoint)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.1)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Run the genetic algorithm
+    pop = toolbox.population(n=50)
+    logbook = tools.Logbook()
+    best_individual = None
+    best_sum_radii = 0.0
+    for gen in range(100):
+        offspring = algorithms.varAnd(pop, toolbox, cxpb=0.5, mutpb=0.1)
+        fits = toolbox.map(toolbox.evaluate, offspring)
+        for fit, ind in zip(fits, offspring):
+            ind.fitness.values = fit
+        pop = tools.selTournament(pop + offspring, len(pop), tournsize=3)
+        # Keep track of best solution
+        if pop:
+            best = tools.selBest(pop, 1)[0]
+            if best.fitness.values[0] < best_sum_radii:
+                best_sum_radii = best.fitness.values[0]
+                best_individual = best
+
+    # Extract the best solution
+    centers_opt = best_individual[:n_circles * 2].reshape(n_circles, 2)
+    radii_opt = best_individual[n_circles * 2:]
+
+    # Ensure all radii are non-negative
+    radii_opt = np.maximum(radii_opt, 0)
+
+    # Validate the packing
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        print(f"Validation failed: {message}")
+        return np.zeros((n_circles, 2)), np.zeros(n_circles), 0.0
+
+    sum_radii = np.sum(radii_opt)
+    return centers_opt, radii_opt, sum_radii
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```

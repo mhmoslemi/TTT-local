@@ -1,0 +1,236 @@
+<strategy>
+To improve the circle packing in the unit square, we can refine the approach by addressing several key areas:
+
+1. **Enhanced Initial Layouts**:
+   - The existing initial layouts are too generic. We can generate more diverse and high-quality initial configurations, including:
+     - **Hexagonal packing with adaptive spacing** (already used, but potentially refined).
+     - **Corner-based layouts** (already used, but we can add more variations like corner-pinned or edge-aligned).
+     - **Randomized layouts** (already used, but we can add density constraints).
+     - **Hybrid layouts** (e.g., a combination of hexagonal and corner-based, potentially offering better performance).
+
+2. **Optimal Placement Near Boundaries and Corners**:
+   - Currently, radii are initialized based on nearest neighbor and boundary distance. We can refine this to:
+     - Assign larger radii to circles in corners or near edges where space is more abundant.
+     - Use a weighted average based on proximity to boundaries and neighbor spacing.
+
+3. **Improved Optimization Method**:
+   - The current optimization method uses `COBYLA` with fixed parameters. We can:
+     - Try different optimization methods (e.g., `SLSQP` or `Nelder-Mead`) for better convergence.
+     - Adjust optimization parameters (e.g., `ftol`, `maxiter`, `disp`).
+     - Use a multi-start optimization by running the optimization from different initial layouts.
+
+4. **Gap Filling and Refinement**:
+   - After optimization, we can perform a local refinement by:
+     - Checking for gaps between circles and adjusting positions/radii.
+     - Using a post-processing step to move misaligned circles closer to the center or to the boundary if it helps.
+
+5. **Hybrid Packing Schemes**:
+   - We can experiment with hybrid schemes such as:
+     - **Nested packing**: Place smaller circles inside larger ones.
+     - **Clustered packing**: Cluster circles near the center and fill the periphery.
+     - **Mixed hexagonal and hexagonal-like patterns** that exploit the square geometry better.
+
+6. **Enhanced Constraints**:
+   - We can refine the constraints function to ensure accuracy and prevent invalid solutions by:
+     - Using stricter tolerance values.
+     - Ensuring all constraints are properly enforced.
+
+7. **Parallelization and Multi-Start Optimization**:
+   - We can use multi-start optimization by running the optimization from multiple diverse initial layouts (as already done), to avoid getting stuck in local optima.
+
+By combining these improvements, we aim to create a more refined and higher-performing circle packing algorithm that can approach the target sum of radii of 2.636.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+    
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+    
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+    
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = centers[i][0] - centers[j][0]
+            dy = centers[i][1] - centers[j][1]
+            dist = np.sqrt(dx**2 + dy**2)
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+    
+    return True, "ok"
+
+def run_packing():
+    n = 26
+
+    # Generate multiple initial layouts
+    initial_layouts = []
+
+    # Hexagonal packing with adaptive spacing
+    def generate_hexagonal_centers(n):
+        centers = np.zeros((n, 2))
+        i = 0
+        for row in range(int(np.sqrt(n)) + 1):
+            for col in range(int(np.sqrt(n)) + 1):
+                if i < n:
+                    spacing = 1.0 / (np.sqrt(n) + 1.0)
+                    x = col * spacing + spacing / 2.0
+                    y = row * spacing + spacing / 2.0 + (row % 2) * spacing / 2.0
+                    x = np.clip(x, 0.0, 1.0)
+                    y = np.clip(y, 0.0, 1.0)
+                    centers[i] = [x, y]
+                    i += 1
+        return centers
+
+    initial_layouts.append(generate_hexagonal_centers(n))
+
+    # Corner-packed layout
+    def generate_corner_centers(n):
+        centers = np.zeros((n, 2))
+        i = 0
+        for corner in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+            for col in range(5):
+                for row in range(5):
+                    if i < n:
+                        x = corner[0] + col * 0.1 + 0.05
+                        y = corner[1] + row * 0.1 + 0.05
+                        centers[i] = [x, y]
+                        i += 1
+        return centers
+
+    initial_layouts.append(generate_corner_centers(n))
+
+    # Randomized layout with density constraints
+    def generate_random_centers(n):
+        centers = np.random.rand(n, 2)
+        centers = np.clip(centers, 0.0, 1.0)
+        # Ensure no two points are too close
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i][0] - centers[j][0]
+                dy = centers[i][1] - centers[j][1]
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist < 0.05:
+                    # Re-position one of the points
+                    centers[i] = [np.random.rand(), np.random.rand()]
+                    centers[i] = np.clip(centers[i], 0.0, 1.0)
+        return centers
+
+    initial_layouts.append(generate_random_centers(n))
+
+    # Clustered layout with tight spacing
+    def generate_clustered_centers(n):
+        centers = np.zeros((n, 2))
+        i = 0
+        for col in range(5):
+            for row in range(5):
+                if i < n:
+                    x = col * 0.2 + 0.1
+                    y = row * 0.2 + 0.1
+                    centers[i] = [x, y]
+                    i += 1
+        return centers
+
+    initial_layouts.append(generate_clustered_centers(n))
+
+    # Hybrid layout: corner + center packing
+    def generate_corner_center_centers(n):
+        centers = np.zeros((n, 2))
+        i = 0
+        for corner in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+            for col in range(5):
+                for row in range(5):
+                    if i < n:
+                        x = corner[0] + col * 0.1 + 0.05
+                        y = corner[1] + row * 0.1 + 0.05
+                        centers[i] = [x, y]
+                        i += 1
+        return centers
+
+    initial_layouts.append(generate_corner_center_centers(n))
+
+    best_sum = 0.0
+    best_centers = np.zeros((n, 2))
+    best_radii = np.zeros(n)
+
+    for centers in initial_layouts:
+        # Initialize radii: minimum of boundary and nearest neighbor
+        radii = np.zeros(n)
+        for i in range(n):
+            min_dist_boundary = min(centers[i][0], 1 - centers[i][0], centers[i][1], 1 - centers[i][1])
+            min_dist_neighbor = np.inf
+            for j in range(n):
+                if i != j:
+                    dx = centers[i][0] - centers[j][0]
+                    dy = centers[i][1] - centers[j][1]
+                    dist = np.sqrt(dx**2 + dy**2)
+                    if dist < min_dist_neighbor:
+                        min_dist_neighbor = dist
+            r = min(min_dist_boundary * 0.9, min_dist_neighbor / 2)
+            radii[i] = r
+
+        # Objective function to maximize sum of radii
+        def objective(x):
+            return -np.sum(x)
+
+        # Constraint function: must be >= 0
+        def constraints(x):
+            for i in range(n):
+                x_i, y_i = centers[i]
+                r_i = x[i]
+                if (x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12
+                        or y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12):
+                    return -np.inf
+            for i in range(n):
+                for j in range(i + 1, n):
+                    dx = centers[i][0] - centers[j][0]
+                    dy = centers[i][1] - centers[j][1]
+                    dist = np.sqrt(dx**2 + dy**2)
+                    if dist < x[i] + x[j] - 1e-12:
+                        return -np.inf
+            return 0.0
+
+        # Bounds for radii: non-negative
+        bounds = [(0, 1) for _ in range(n)]
+
+        # Run optimization with COBYLA for robustness
+        result = optimize.minimize(
+            objective,
+            radii,
+            bounds=bounds,
+            constraints={"type": "ineq", "fun": constraints},
+            method="SLSQP",
+            options={"ftol": 1e-9, "maxiter": 1500, "disp": False}
+        )
+
+        final_radii = result.x
+        final_centers = centers
+
+        # Validate packing
+        valid, message = validate_packing(final_centers, final_radii)
+        if not valid:
+            print(f"Validation Failed: {message}")
+            continue
+
+        sum_radii = np.sum(final_radii)
+
+        # Update best
+        if sum_radii > best_sum:
+            best_sum = sum_radii
+            best_centers = final_centers.copy()
+            best_radii = final_radii.copy()
+
+    return best_centers, best_radii, best_sum
+```

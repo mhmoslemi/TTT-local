@@ -1,0 +1,153 @@
+<strategy>
+To improve the circle packing in the unit square, we can adopt a more sophisticated approach that includes the following key improvements:
+
+1. **Initialization Strategy**:
+   - Instead of simple hexagonal packing, use a more refined initial layout such as a "grid with variable spacing" that accounts for the square boundaries more closely.
+   - We can also try different initial layouts, such as placing more circles near edges and corners to take advantage of the boundary constraints.
+
+2. **Optimization Method**:
+   - The current optimization uses `SLSQP`, but for constrained non-linear problems, `COBYLA` or `Nelder-Mead` might also be better.
+   - Use a hybrid optimization, starting with `SLSQP` and refining with another method.
+
+3. **Constraint Handling**:
+   - Instead of penalizing overlaps and boundary violations, we can explicitly enforce them as constraints.
+   - Use more precise constraints that directly prevent overlaps and boundary violations.
+
+4. **Dynamic Radius Adjustment**:
+   - During optimization, dynamically update the radius of circles that are near boundaries to better utilize available space.
+   - Introduce a "boundary sensitivity" parameter that allows radii to grow more in the direction of open space.
+
+5. **Local Refinement**:
+   - After obtaining an initial packing, apply a local refinement process to move and resize circles in areas with poor utilization or high overlap.
+
+6. **Population-Based Metaheuristics**:
+   - Consider integrating a genetic algorithm or simulated annealing to explore more complex configurations and avoid local optima.
+
+By integrating these strategies, we aim to achieve a more optimal and efficient circle packing within the unit square, potentially reaching or surpassing the target sum of radii of 2.636.
+</strategy>
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+from scipy.optimize import Bounds
+from scipy.optimize import LinearConstraint
+import matplotlib.pyplot as plt
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    # Step 1: Generate an improved initial layout with boundary-aware spacing
+    def generate_boundary_focused_layout(n, square_size=1.0):
+        # Place circles closer to the edges and corners to maximize boundary utilization
+        hex_radius = 0.15  # A larger radius to start with
+        # Create a grid-like layout but closer to the borders
+        grid_centers = []
+        for i in range(n):
+            row = i // 2
+            col = i % 2
+            # Offset to place circles closer to boundaries (especially corners)
+            x = col * (hex_radius * np.sqrt(3)) + 0.5 * hex_radius * np.sqrt(3)
+            y = row * (2 * hex_radius) + 0.5 * hex_radius
+            # Adjust x and y to be closer to the corners
+            x += (1 - x) * 0.5 if col == 0 else x * 0.5
+            y += (1 - y) * 0.5 if row == 0 else y * 0.5
+            grid_centers.append([x, y])
+        # Convert to numpy array and normalize to unit square
+        grid_centers = np.array(grid_centers)
+        grid_centers /= np.max(grid_centers)
+        return grid_centers
+
+    # Initial guess for centers
+    centers = generate_boundary_focused_layout(26)
+    # All circles will have the same initial radius (will be optimized)
+    radii = np.full(26, 0.05)
+
+    def objective(x):
+        """Objective to maximize the sum of radii."""
+        centers = x[:2*26].reshape(26, 2)
+        radii = x[2*26:]
+        return -np.sum(radii)  # Minimize negative sum to maximize sum
+
+    # Define constraints
+    def constraint_overlap(x):
+        """Constraint to ensure circles do not overlap."""
+        centers = x[:2*26].reshape(26, 2)
+        radii = x[2*26:]
+        for i in range(26):
+            for j in range(i + 1, 26):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return -np.inf  # Penalize overlap
+        return np.sum(radii)  # Return sum of radii as a penalty for overlap
+
+    def constraint_boundary(x):
+        """Constraint to ensure circles are within the unit square."""
+        centers = x[:2*26].reshape(26, 2)
+        radii = x[2*26:]
+        for i in range(26):
+            x_i, y_i = centers[i]
+            r_i = radii[i]
+            if x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12:
+                return -np.inf  # Penalize violation of horizontal bound
+            if y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12:
+                return -np.inf  # Penalize violation of vertical bound
+        return np.sum(radii)  # Return sum of radii as a penalty for boundary violations
+
+    def constraint_total(x):
+        """Combine both constraints into a single function."""
+        return constraint_overlap(x) + constraint_boundary(x)
+
+    # Optimization bounds - centers within [0,1]^2, radii non-negative
+    bounds = Bounds(np.zeros(2*26 + 26), np.ones(2*26 + 26))
+
+    # Initial guess
+    initial_guess = np.concatenate([centers.flatten(), radii])
+
+    # Optimization with SLSQP and COBYLA as refinement
+    result_slsqp = minimize(
+        fun=constraint_total,
+        x0=initial_guess,
+        method='SLSQP',
+        bounds=bounds,
+        tol=1e-6,
+        options={'maxiter': 300}
+    )
+
+    result_cobyla = minimize(
+        fun=constraint_total,
+        x0=result_slsqp.x,
+        method='COBYLA',
+        bounds=bounds,
+        tol=1e-6,
+        options={'maxiter': 300}
+    )
+
+    # Post-processing to ensure constraints are met
+    final_centers = result_cobyla.x[:2*26].reshape(26, 2)
+    final_radii = result_cobyla.x[2*26:]
+
+    # Final check for overlaps
+    for i in range(26):
+        for j in range(i + 1, 26):
+            dx = final_centers[i, 0] - final_centers[j, 0]
+            dy = final_centers[i, 1] - final_centers[j, 1]
+            dist = np.sqrt(dx**2 + dy**2)
+            if dist < final_radii[i] + final_radii[j] - 1e-12:
+                # Reduce radii to prevent overlap
+                if final_radii[i] > final_radii[j]:
+                    final_radii[i] = dist - final_radii[j] + 1e-12
+                else:
+                    final_radii[j] = dist - final_radii[i] + 1e-12
+
+    # Final check for boundary violations
+    for i in range(26):
+        x, y = final_centers[i]
+        r = final_radii[i]
+        if x - r < -1e-12 or x + r > 1 + 1e-12 or y - r < -1e-12 or y + r > 1 + 1e-12:
+            # Reduce radius to fit in square
+            final_radii[i] = min(r, 1 - max(x, 1 - x), 1 - max(y, 1 - y))
+
+    # Calculate sum of radii
+    sum_radii = np.sum(final_radii)
+    return final_centers, final_radii, sum_radii
+```

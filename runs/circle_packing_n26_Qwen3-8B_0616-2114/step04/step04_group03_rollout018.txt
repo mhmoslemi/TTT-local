@@ -1,0 +1,161 @@
+<strategy>
+To improve the circle packing in the unit square for 26 circles, we need to refine both the initial configuration and the optimization strategy.
+
+### Key Improvements:
+1. **Initial Configuration**:
+   - A simple grid-based initial configuration may not lead to the optimal packing. A better approach is to use a hexagonal (or hexagonal close-packed) arrangement in the center, with circles near the edges and corners.
+   - We'll use a more strategic initialization by placing circles in a hexagonal grid pattern and then filling remaining positions near the edges to optimize the overall layout.
+
+2. **Optimization Strategy**:
+   - The previous approach used SLSQP with a penalty-based objective function. To improve convergence and avoid local minima, we can use a hybrid optimization approach, such as combining the penalty method with a more robust optimization algorithm like differential evolution (DE), which is better at exploring the search space.
+   - We can refine the objective function to include a direct fitness function that directly maximizes the sum of radii, rather than minimizing a penalty function.
+
+3. **Boundary and Corner Packing**:
+   - Circles near the edges and corners are often underutilized. We can apply a special optimization strategy to these circles, such as increasing their radii while maintaining distance constraints with neighboring circles.
+
+4. **Constraint Handling**:
+   - Instead of adding penalty terms to the objective function, we can enforce constraints more directly using inequality constraints in the optimization problem. This helps the optimizer maintain valid configurations with minimal penalty function use.
+
+5. **Hybrid Packing Strategy**:
+   - A combination of hexagonal packing for the bulk of the circles and a scattered arrangement for the remaining circles can lead to a more efficient packing.
+
+### Implementation:
+- We will modify the `run_packing` function to use a more sophisticated initial configuration, a hybrid optimization approach using differential evolution, and a more direct objective function to maximize the sum of radii while satisfying all constraints.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    def validate_packing(centers, radii):
+        n = centers.shape[0]
+
+        if np.isnan(centers).any() or np.isnan(radii).any():
+            return False, "NaN values present"
+
+        for i in range(n):
+            if radii[i] < 0:
+                return False, f"Circle {i} has negative radius {radii[i]}"
+
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            if (x - r < -1e-12 or x + r > 1 + 1e-12
+                    or y - r < -1e-12 or y + r > 1 + 1e-12):
+                return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return False, f"Circles {i} and {j} overlap"
+
+        return True, "ok"
+
+    def create_hexagonal_packing(n_circles):
+        centers = np.zeros((n_circles, 2))
+        idx = 0
+
+        # Hexagonal grid in the center
+        rows = int(np.sqrt(n_circles * 2 / 3))
+        cols = int(n_circles / rows)
+        spacing = 0.25
+        offset = 0.05
+        for row in range(rows):
+            for col in range(cols):
+                if idx < n_circles:
+                    x = offset + col * spacing
+                    y = offset + row * spacing * np.sqrt(3)/2
+                    centers[idx] = [x, y]
+                    idx += 1
+
+        # Fill remaining circles near edges
+        while idx < n_circles:
+            x = np.random.uniform(0.1, 0.9)
+            y = np.random.uniform(0.1, 0.9)
+            centers[idx] = [x, y]
+            idx += 1
+
+        return centers
+
+    def objective_function(params, n_circles):
+        centers = params[:n_circles * 2].reshape((n_circles, 2))
+        radii = params[n_circles * 2:].reshape((n_circles,))
+
+        # Return the negative of the sum of radii to maximize it
+        return -np.sum(radii)
+
+    def constraint_function(params, n_circles):
+        centers = params[:n_circles * 2].reshape((n_circles, 2))
+        radii = params[n_circles * 2:].reshape((n_circles,))
+
+        # Constraints: distance between centers >= r_i + r_j
+        constraints = []
+        for i in range(n_circles):
+            for j in range(i + 1, n_circles):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                constraints.append(dist - (radii[i] + radii[j] - 1e-12))
+        return constraints
+
+    def boundary_constraints(params, n_circles):
+        centers = params[:n_circles * 2].reshape((n_circles, 2))
+        radii = params[n_circles * 2:].reshape((n_circles,))
+
+        constraints = []
+        for i in range(n_circles):
+            x, y = centers[i]
+            r = radii[i]
+            # Ensure circle is inside the square
+            constraints.append(x - r - 1e-12)
+            constraints.append(x + r - 1.0 + 1e-12)
+            constraints.append(y - r - 1e-12)
+            constraints.append(y + r - 1.0 + 1e-12)
+        return constraints
+
+    n_circles = 26
+
+    # Create an initial configuration based on a hexagonal grid
+    initial_centers = create_hexagonal_packing(n_circles)
+    initial_radii = np.full(n_circles, 0.05)
+
+    # Flatten centers and radii for optimization
+    initial_params = np.concatenate([initial_centers.flatten(), initial_radii])
+
+    # Optimization settings
+    bounds = []
+    for _ in range(n_circles * 2):
+        bounds.append((0, 1))
+    for _ in range(n_circles):
+        bounds.append((0, 1))
+
+    # Use differential evolution for global optimization
+    result = optimize.differential_evolution(
+        fun=lambda x: objective_function(x, n_circles),
+        bounds=bounds,
+        constraints=[
+            {"type": "ineq", "fun": lambda x: constraint_function(x, n_circles)},
+            {"type": "ineq", "fun": lambda x: boundary_constraints(x, n_circles)}
+        ],
+        strategy='best1bin',
+        popsize=15,
+        maxiter=200,
+        tol=1e-8,
+        mutation=(0.5, 1),
+        recombination=0.8
+    )
+
+    # Extract the optimal solution
+    optimal_params = result.x
+    centers_opt = optimal_params[:n_circles * 2].reshape((n_circles, 2))
+    radii_opt = optimal_params[n_circles * 2:].reshape((n_circles,))
+    sum_radii = np.sum(radii_opt)
+
+    # Validate the packing
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        print(f"Validation failed: {message}")
+        return np.array([]), np.array([]), 0.0
+
+    return centers_opt, radii_opt, sum_radii
+```

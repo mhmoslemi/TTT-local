@@ -1,0 +1,149 @@
+<strategy>
+To further improve the circle packing and achieve a higher sum of radii (targeting 2.636), we need a more sophisticated and optimized approach. The current method uses a simple grid-based initial configuration with a local optimizer (SLSQP). While this is a good starting point, it's limited in its ability to find globally optimal configurations due to the complexity of the circle packing problem.
+
+### Key Improvements:
+1. **Initial Configuration**:
+   - The current grid-based initial configuration may not distribute circles optimally. We can use a **hexagonal packing** or **randomized near-optimal seeding** to get closer to the optimal solution from the start.
+
+2. **Optimization Strategy**:
+   - SLSQP can struggle with high-dimensional and constraint-heavy problems. A better option is to use **Genetic Algorithms (GA)**, which are well-suited for optimization in complex, constrained spaces like circle packing.
+   - We should also consider **multi-objective optimization**, where the goal is to maximize the sum of radii while respecting the constraints.
+
+3. **Constraint Handling**:
+   - The current method uses only inequality constraints, but it can be enhanced by adding **equality constraints** related to edge proximity (e.g., ensuring circles are as close to boundaries as possible without overlapping).
+
+4. **Post-Processing**:
+   - After optimization, we can refine the solution with a **local refinement stage**, such as adjusting positions and radii slightly to reduce overlaps and improve edge usage.
+
+5. **Boundary Utilization**:
+   - The current configuration may waste space near the edges. A better approach is to position some circles along the boundaries to maximize their radii.
+
+6. **Hybrid Packing**:
+   - A hybrid of **hexagonal packing** for dense regions and **randomized packing** for sparse regions might yield better results.
+
+### Plan:
+- Use **Genetic Algorithm (GA)** with a custom fitness function that maximizes the sum of radii while respecting boundary and pairwise constraints.
+- Use a **hexagonal packing as a seed** for the GA population.
+- After GA optimization, apply **local refinement** using a constrained optimization method (like SLSQP) to fine-tune the configuration.
+- Ensure the packing remains valid with respect to all constraints.
+
+We will define a GA-based approach using `scipy.optimize.differential_evolution` and then refine the result with SLSQP for accuracy and convergence.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+from scipy.optimize import differential_evolution
+
+def run_packing() -> tuple[np.ndarray, np.ndarray, float]:
+    def validate_packing(centers, radii):
+        n = centers.shape[0]
+
+        if np.isnan(centers).any() or np.isnan(radii).any():
+            return False, "NaN values present"
+
+        for i in range(n):
+            if radii[i] < 0:
+                return False, f"Circle {i} has negative radius {radii[i]}"
+
+        for i in range(n):
+            x, y = centers[i]
+            r = radii[i]
+            if (x - r < -1e-12 or x + r > 1 + 1e-12
+                    or y - r < -1e-12 or y + r > 1 + 1e-12):
+                return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return False, f"Circles {i} and {j} overlap"
+
+        return True, "ok"
+
+    def objective_function(centers_and_radii):
+        centers = centers_and_radii[:26*2].reshape((26, 2))
+        radii = centers_and_radii[26*2:].reshape((26,))
+        return -np.sum(radii)  # Minimize negative sum to maximize sum of radii
+
+    def constraint_function(centers_and_radii):
+        centers = centers_and_radii[:26*2].reshape((26, 2))
+        radii = centers_and_radii[26*2:].reshape((26,))
+        constraints = []
+
+        # Boundary constraints
+        for i in range(26):
+            x, y = centers[i]
+            r = radii[i]
+            constraints.append(x - r >= -1e-12)
+            constraints.append(x + r <= 1 + 1e-12)
+            constraints.append(y - r >= -1e-12)
+            constraints.append(y + r <= 1 + 1e-12)
+
+        # Overlap constraints
+        for i in range(26):
+            for j in range(i + 1, 26):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                constraints.append(dist - (radii[i] + radii[j] - 1e-12) >= 0)
+
+        return constraints
+
+    # Generate a hexagonal packing as initial configuration
+    def create_hexagonal_packing(n_circles):
+        centers = np.zeros((n_circles, 2))
+        idx = 0
+        for row in range(4):
+            for col in range(6):
+                x = 0.1 + col * 0.2
+                y = 0.1 + row * (np.sqrt(3)/2 * 0.2)
+                if idx < n_circles:
+                    centers[idx] = [x, y]
+                    idx += 1
+        # Fill remaining circles near edges
+        while idx < n_circles:
+            x = np.random.uniform(0.1, 0.9)
+            y = np.random.uniform(0.1, 0.9)
+            centers[idx] = [x, y]
+            idx += 1
+        return centers
+
+    # Generate initial seed for differential evolution
+    centers_seed = create_hexagonal_packing(26)
+    radii_seed = np.full(26, 0.05)
+    initial_params = np.concatenate([centers_seed.flatten(), radii_seed])
+
+    # Bounds: [0,1] for x and y positions, [0,1] for radii
+    bounds = []
+    for _ in range(26 * 2):
+        bounds.append((0, 1))
+    for _ in range(26):
+        bounds.append((0, 1))
+
+    # Use differential evolution for global optimization
+    result = differential_evolution(
+        fun=objective_function,
+        bounds=bounds,
+        constraints=constraint_function,
+        strategy='best1bin',
+        popsize=15,
+        mutation=(0.5, 1),
+        recombination=0.9,
+        tolerance=1e-6,
+        maxiter=200,
+        polish=True
+    )
+
+    # Extract optimal solution
+    optimal_params = result.x
+    centers_opt = optimal_params[:26 * 2].reshape((26, 2))
+    radii_opt = optimal_params[26 * 2:].reshape((26,))
+    sum_radii = np.sum(radii_opt)
+
+    # Validate the packing
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        print(f"Validation failed: {message}")
+        return np.array([]), np.array([]), 0.0
+
+    return centers_opt, radii_opt, sum_radii
+```

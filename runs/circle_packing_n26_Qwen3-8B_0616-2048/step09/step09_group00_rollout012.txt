@@ -1,0 +1,180 @@
+<strategy>
+To improve the circle packing in the unit square, I will implement a more refined strategy that combines:
+
+1. **Hexagonal close packing with improved grid generation**: To better distribute the circles with minimal spacing, especially in the densest parts of the square.
+
+2. **Boundary-aware placement**: To ensure circles near the edges and corners are optimally placed and resized, avoiding overlaps and staying within the boundary.
+
+3. **Hybrid optimization approach**: Using a combination of global optimization methods to better explore potential configurations and local refinements to fine-tune the solution.
+
+4. **Dynamic radius adjustment**: Using an initial guess for radii based on inter-circle distances, then refining it during the optimization process to allow for more flexibility in packing.
+
+5. **Iterative refinement**: Using the initial packing and optimization result as a starting point for a more refined optimization round that focuses on minimizing overlap and increasing radius sum.
+
+6. **Use of multiple optimization methods**: Combining global algorithms like differential evolution with local solvers like SLSQP to improve robustness and convergence.
+
+These steps aim to maximize the total sum of radii without violating the unit square bounds and non-overlapping constraints.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def run_packing():
+    num_circles = 26
+
+    # Step 1: Generate an initial hexagonal grid of circles
+    ideal_rows = int(np.ceil(np.sqrt(num_circles)))
+    ideal_cols = int(np.ceil(num_circles / ideal_rows))
+    row_spacing = 1.0 / ideal_rows
+    col_spacing = 1.0 / ideal_cols
+
+    # Generate hexagonal grid
+    centers = np.zeros((num_circles, 2))
+    idx = 0
+    for i in range(ideal_rows):
+        for j in range(ideal_cols):
+            if idx >= num_circles:
+                break
+            x = j * col_spacing + (0.5 * col_spacing if i % 2 else 0)
+            y = i * row_spacing + 0.5 * row_spacing
+            if x + 0.5 * col_spacing <= 1 and y + 0.5 * row_spacing <= 1:
+                centers[idx] = [x, y]
+                idx += 1
+
+    # Add remaining circles in strategic edge positions
+    edge_positions = [
+        [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+        [0.1, 0.5], [0.5, 0.1], [0.5, 0.9], [0.9, 0.5],
+        [0.25, 0.25], [0.25, 0.75], [0.75, 0.25], [0.75, 0.75],
+        [0.1, 0.25], [0.1, 0.75], [0.9, 0.25], [0.9, 0.75]
+    ]
+
+    for pos in edge_positions:
+        if idx < num_circles:
+            centers[idx] = pos
+            idx += 1
+
+    # Add remaining random circles close to boundaries
+    if idx < num_circles:
+        remaining = num_circles - idx
+        random_centers = np.random.rand(remaining, 2)
+        random_centers = np.clip(random_centers, 0.1, 0.9)
+        centers[idx:] = random_centers
+
+    # Step 2: Compute initial radii based on minimum inter-circle distance
+    def compute_min_inter_circle_dist(centers):
+        min_dist = np.inf
+        for i in range(centers.shape[0]):
+            for j in range(i + 1, centers.shape[0]):
+                dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+                if dist < min_dist:
+                    min_dist = dist
+        return min_dist
+
+    min_dist = compute_min_inter_circle_dist(centers)
+    radii = np.full(num_circles, min_dist / 2.0)
+
+    # Step 3: Define objective function to maximize sum of radii
+    def objective(x):
+        # Split x into centers and radii
+        centers_flat = x[:2 * num_circles].reshape(num_circles, 2)
+        radii_flat = x[2 * num_circles:].reshape(num_circles)
+
+        # Check if this configuration is valid
+        is_valid, _ = validate_packing(centers_flat, radii_flat)
+        if not is_valid:
+            return float('inf')
+
+        # Compute and return the negative objective (minimization)
+        return -np.sum(radii_flat)
+
+    # Step 4: Define bounds for centers and radii
+    center_bounds = []
+    for _ in range(num_circles):
+        center_bounds.append((0.0, 1.0))
+        center_bounds.append((0.0, 1.0))
+
+    radius_bounds = []
+    for _ in range(num_circles):
+        radius_bounds.append((0.0, 0.5))  # Max radius is 0.5 to avoid overlap
+
+    bounds = center_bounds + radius_bounds
+
+    # Step 5: Initial guess combining centers and radii
+    x0 = np.concatenate((centers.flatten(), radii))
+
+    # Step 6: Optimization with differential evolution for global search
+    result = opt.differential_evolution(
+        objective,
+        bounds,
+        strategy='best1bin',
+        maxiter=100,
+        popsize=15,
+        tol=1e-8,
+        mutation=(0.5, 1),
+        recombination=0.9,
+        disp=False
+    )
+
+    # Step 7: Extract final centers and radii from the result
+    centers_final = result.x[:2 * num_circles].reshape(num_circles, 2)
+    radii_final = result.x[2 * num_circles:].reshape(num_circles)
+
+    # Step 8: Refine the solution using local optimization (SLSQP)
+    def refined_objective(x):
+        centers_flat = x[:2 * num_circles].reshape(num_circles, 2)
+        radii_flat = x[2 * num_circles:].reshape(num_circles)
+        is_valid, _ = validate_packing(centers_flat, radii_flat)
+        if not is_valid:
+            return float('inf')
+        return -np.sum(radii_flat)
+
+    # Use the previous result as initial guess for SLSQP
+    x0_refined = np.concatenate((centers_final.flatten(), radii_final))
+    result_refined = opt.minimize(
+        refined_objective,
+        x0_refined,
+        method='SLSQP',
+        bounds=bounds,
+        tol=1e-8,
+        options={'maxiter': 200, 'disp': False}
+    )
+
+    # Step 9: Extract final configuration after refinement
+    centers_final = result_refined.x[:2 * num_circles].reshape(num_circles, 2)
+    radii_final = result_refined.x[2 * num_circles:].reshape(num_circles)
+
+    # Final validation
+    assert validate_packing(centers_final, radii_final)[0], "Final configuration is invalid"
+
+    # Compute the total sum of radii
+    sum_radii = np.sum(radii_final)
+
+    return centers_final, radii_final, sum_radii
+```

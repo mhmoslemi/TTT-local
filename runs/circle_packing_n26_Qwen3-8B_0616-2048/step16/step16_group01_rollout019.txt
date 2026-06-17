@@ -1,0 +1,189 @@
+<strategy>
+To improve the circle packing arrangement and achieve a higher sum of radii (targeting 2.636), we can follow a multi-pronged strategy:
+
+1. **Refine Initial Layout**: The initial hexagonal grid and random placements may not be optimal. We can try more diverse layouts, such as:
+   - **Hexagonal packing with better spacing** to maximize density.
+   - **Hybrid layouts** (e.g., combine rows with offsets to fill gaps better).
+   - **Grid arrangements** with optimized spacing.
+
+2. **Improve Boundary Handling**: Current random points might not fill the corners or edges efficiently. We can:
+   - Ensure strategic placement of circles near boundaries to utilize space better.
+   - Prioritize circles that are near edges and corners by restricting their radii based on proximity to boundaries.
+
+3. **Use Better Optimization Methods**: Nelder-Mead is a good choice for non-convex problems, but other methods may yield better results:
+   - **COBYLA**: Good for bounded problems.
+   - **SLSQP**: Handles constraints effectively.
+   - **Genetic Algorithms (GA)**: Can explore a wide search space for complex, non-convex problems.
+
+4. **Refine Initial Radii Estimation**: Instead of setting all radii to `min_dist / 2`, we can use a more nuanced approach:
+   - For each circle, calculate the closest distance to boundaries and to other circles.
+   - Set initial radii based on the minimum of these values, allowing for some overlap during optimization.
+
+5. **Hybrid Objective Function**: Introduce constraints to guide the optimization:
+   - Add a penalty for circles that get too close to boundaries.
+   - Add a penalty for circles that overlap.
+   - Use a soft constraint to encourage better use of space, especially in corners.
+
+6. **Use a Multi-stage Optimization**: Perform:
+   - A pre-sampling phase with hexagonal or square grid structures.
+   - A refinement phase using a constrained optimization method like SLSQP or COBYLA.
+   - A final fine-tuning phase with a genetic algorithm or Nelder-Mead for better convergence.
+
+7. **Add Custom Distance Constraints**: Implement a custom constraint function that ensures proper radii and spacing between circles.
+
+By combining better initial layouts, refined initial radii, and more effective optimization strategies, we can achieve a higher sum of radii for 26 circles in the unit square.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+from scipy.spatial.distance import cdist
+from scipy.optimize import Bounds, LinearConstraint
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def run_packing():
+    num_circles = 26
+
+    # Create a hexagonal arrangement for initial centers
+    centers = np.zeros((num_circles, 2))
+    idx = 0
+    max_col = 5
+    max_row = 5
+    spacing = 0.2  # Adjust spacing for optimal hexagonal packing
+    for row in range(max_row):
+        for col in range(max_col):
+            if idx >= num_circles:
+                break
+            x = col * spacing + 0.1
+            y = row * spacing + 0.1
+            if row % 2 == 1:
+                x += spacing / 2
+            centers[idx] = [x, y]
+            idx += 1
+
+    # Fill remaining centers with edge and corner positions
+    edge_positions = [
+        [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+        [0.1, 0.5], [0.5, 0.1], [0.5, 0.9], [0.9, 0.5]
+    ]
+    for pos in edge_positions:
+        if idx < num_circles:
+            centers[idx] = pos
+            idx += 1
+
+    # Fill remaining positions with random centers
+    if idx < num_circles:
+        remaining = num_circles - idx
+        random_centers = np.random.rand(remaining, 2)
+        random_centers = (random_centers * 2 - 1) * 0.5 + 0.5  # Scale to [0, 1]
+        centers[idx:] = random_centers
+
+    # Compute initial radius estimates based on minimum inter-circle distance and boundary proximity
+    min_dist = np.inf
+    for i in range(num_circles):
+        for j in range(i + 1, num_circles):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < min_dist:
+                min_dist = dist
+
+    # Set initial radii based on min_dist and boundary proximity
+    radii = np.full(num_circles, min_dist / 2.0)
+    for i in range(num_circles):
+        x, y = centers[i]
+        max_r = min(x, 1 - x, y, 1 - y)
+        radii[i] = min(radii[i], max_r)
+
+    # Define objective function to maximize sum of radii
+    def objective(x):
+        # Split x into centers and radii
+        centers_flat = x[:2 * num_circles].reshape(num_circles, 2)
+        radii_flat = x[2 * num_circles:].reshape(num_circles)
+
+        # Check if this configuration is valid
+        is_valid, _ = validate_packing(centers_flat, radii_flat)
+        if not is_valid:
+            return float('inf')
+
+        # Compute and return the negative objective (minimization)
+        return -np.sum(radii_flat)
+
+    # Define bounds for centers and radii
+    center_bounds = []
+    for _ in range(num_circles):
+        center_bounds.append((0.0, 1.0))
+        center_bounds.append((0.0, 1.0))
+
+    radius_bounds = []
+    for _ in range(num_circles):
+        radius_bounds.append((0.0, 0.5))  # Max radius is 0.5 to avoid overlap
+
+    bounds = center_bounds + radius_bounds
+
+    # Define equality constraints for non-overlapping and within bound (soft)
+    def constraint_func(x):
+        centers_flat = x[:2 * num_circles].reshape(num_circles, 2)
+        radii_flat = x[2 * num_circles:].reshape(num_circles)
+
+        # Check for non-overlapping and being within unit square
+        for i in range(num_circles):
+            x_i, y_i = centers_flat[i]
+            r_i = radii_flat[i]
+            if (x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12
+                    or y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12):
+                return np.inf
+            for j in range(i + 1, num_circles):
+                dist = np.sqrt(np.sum((centers_flat[i] - centers_flat[j]) ** 2))
+                if dist < radii_flat[i] + radii_flat[j] - 1e-12:
+                    return np.inf
+        return 0.0
+
+    # Define the initial guess
+    x0 = np.concatenate((centers.flatten(), radii))
+
+    # Use a more effective optimization method
+    result = opt.minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=[{'type': 'eq', 'fun': constraint_func}],
+        tol=1e-8,
+        options={'maxiter': 1000, 'disp': False}
+    )
+
+    # Extract the final centers and radii
+    centers_final = result.x[:2 * num_circles].reshape(num_circles, 2)
+    radii_final = result.x[2 * num_circles:].reshape(num_circles)
+
+    # Validate final configuration
+    assert validate_packing(centers_final, radii_final)[0], "Final configuration is invalid"
+
+    # Compute the total sum of radii
+    sum_radii = np.sum(radii_final)
+
+    return centers_final, radii_final, sum_radii
+```

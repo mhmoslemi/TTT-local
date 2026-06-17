@@ -1,0 +1,195 @@
+<strategy>
+To achieve a target sum of radii of 2.636 for 26 circles within a unit square, we need to optimize both the geometric arrangement and the numerical optimization approach. The previous implementation used a hybrid grid-based method with random placement for the remaining circles, but that strategy didn't maximize the sum of radii sufficiently.
+
+### Key Improvements:
+
+1. **Better Initial Arrangement**:
+   - Instead of starting with a grid, use a **hexagonal packing** for the bulk of the circles. Hexagonal packing is known to be the densest for circle packing in a 2D plane.
+   - Add circles near the **edges and corners** with more precise strategic placement rather than random sampling.
+
+2. **Refined Optimization**:
+   - Use **multi-start optimization** to avoid local optima traps.
+   - Adjust **tolerances and bounds** to better handle the complex constraints.
+   - Use **more efficient optimization algorithms**, such as `L-BFGS-B`, which is suitable for bound-constrained problems and can handle nonlinear constraints.
+
+3. **Constraint Handling**:
+   - Enforce strict non-overlap constraints with tolerance.
+   - Ensure all circles are fully contained within the square with tolerance.
+   - Use a **more robust objective function** that penalizes invalid configurations more effectively.
+
+4. **Dynamic Radii Adjustment**:
+   - Allow for more flexible radii optimization by starting with small radii, then increasing them during optimization based on constraints.
+   - Avoid overly restrictive radius bounds to allow for potentially larger radii.
+
+5. **Strategic Edge Placement**:
+   - Strategically add circles near the boundaries and corners to fill in areas where the hexagonal grid leaves space.
+   - Ensure these circles do not overlap with other circles and are well-placed to allow for maximal radii.
+
+6. **Parallel Evaluation**:
+   - Use a multi-start optimization to evaluate multiple starting points, increasing the chances of finding a globally optimal packing.
+
+### Final Plan:
+We'll:
+- Start with a hexagonal grid packing.
+- Add strategic circles near the boundaries and corners.
+- Use a multi-start `L-BFGS-B` optimization with tight constraints.
+- Use a penalty-based objective function to ensure all constraints are met.
+
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as opt
+import math
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+
+def run_packing():
+    num_circles = 26
+
+    # Generate hexagonal grid of centers
+    hex_grid = []
+    row = 0
+    col = 0
+    grid_density = 0.45  # Adjust to fit 26 circles
+    while len(hex_grid) < num_circles:
+        # Compute distance between adjacent circles
+        spacing = 1.0 / (1 + grid_density)
+        # Use hexagonal packing
+        if row % 2 == 0:
+            x = col * spacing
+            y = row * spacing * math.sqrt(3) / 2
+        else:
+            x = (col + 0.5) * spacing
+            y = row * spacing * math.sqrt(3) / 2
+        # Ensure the circle is within the square
+        if x - 0.5 * spacing > 1 + 1e-12 or y - 0.5 * spacing > 1 + 1e-12:
+            continue
+        if x + 0.5 * spacing < -1e-12 or y + 0.5 * spacing < -1e-12:
+            continue
+        hex_grid.append([x, y])
+        col += 1
+        if col % 2 == 0:
+            row += 1
+            col = 0
+
+    # Add circles near edges and corners (strategic placement)
+    edge_positions = [
+        [0.1, 0.1], [0.1, 0.9], [0.9, 0.1], [0.9, 0.9],
+        [0.1, 0.5], [0.5, 0.1], [0.5, 0.9], [0.9, 0.5]
+    ]
+    for pos in edge_positions:
+        if len(hex_grid) < num_circles:
+            hex_grid.append(pos)
+
+    # Add remaining circles with strategic placement
+    while len(hex_grid) < num_circles:
+        # Use a random point within the square
+        x = np.random.rand()
+        y = np.random.rand()
+        # Ensure the circle is within the square to allow at least some radius
+        if x - 0.5 > 1 + 1e-12 or y - 0.5 > 1 + 1e-12:
+            continue
+        if x + 0.5 < -1e-12 or y + 0.5 < -1e-12:
+            continue
+        hex_grid.append([x, y])
+
+    # Function to compute the negative of the objective (to maximize sum)
+    def objective(x):
+        # Extract centers and radii from x
+        centers = x[:2 * num_circles].reshape(num_circles, 2)
+        radii = x[2 * num_circles:].reshape(num_circles)
+
+        # Check if this configuration is valid
+        is_valid, _ = validate_packing(centers, radii)
+        if not is_valid:
+            return float('inf')  # Penalize invalid configurations
+
+        # Compute the sum of radii (we want to maximize this)
+        return -np.sum(radii)  # Negative for minimization
+
+    # Bounds for centers: [0,1] for x and y coordinates
+    center_bounds = []
+    for _ in range(num_circles):
+        center_bounds.append((0.0, 1.0))
+        center_bounds.append((0.0, 1.0))
+
+    # Bounds for radii: [0, 0.5] (since the square is of size 1)
+    radius_bounds = []
+    for _ in range(num_circles):
+        radius_bounds.append((0.0, 0.5))
+
+    # Combine bounds
+    bounds = center_bounds + radius_bounds
+
+    # Initial guess: use the hex_grid and set initial radii to 0.05
+    x0 = np.concatenate((np.array(hex_grid).flatten(), np.full(num_circles, 0.05)))
+
+    # Multi-start optimization to avoid local minima
+    best_sum = -np.inf
+    best_centers = None
+    best_radii = None
+
+    # Use multiple starting points to increase diversity
+    for _ in range(5):  # Try 5 different initial guesses
+        # Perturb the initial positions slightly
+        perturbation = 0.05 * np.random.randn(2 * num_circles)
+        x0_perturbed = x0 + perturbation
+        x0_perturbed = np.clip(x0_perturbed, 0.0, 1.0)
+
+        # Add small random perturbation to radii
+        radii_perturbed = x0_perturbed[2 * num_circles:]
+        radii_perturbed = np.clip(radii_perturbed, 0.0, 0.5)
+
+        # Run optimization
+        result = opt.minimize(
+            objective,
+            x0_perturbed,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={
+                'ftol': 1e-8,
+                'gtol': 1e-8,
+                'maxiter': 1000
+            }
+        )
+
+        if result.success:
+            centers_final = result.x[:2 * num_circles].reshape(num_circles, 2)
+            radii_final = result.x[2 * num_circles:].reshape(num_circles)
+            sum_radii = np.sum(radii_final)
+
+            if sum_radii > best_sum:
+                best_sum = sum_radii
+                best_centers = centers_final
+                best_radii = radii_final
+
+    # Validate best configuration
+    assert validate_packing(best_centers, best_radii)[0], "Best configuration is invalid"
+
+    return best_centers, best_radii, best_sum
+```

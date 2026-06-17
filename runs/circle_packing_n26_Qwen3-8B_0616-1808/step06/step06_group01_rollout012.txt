@@ -1,0 +1,152 @@
+<strategy>
+To improve the packing of 26 circles within a unit square to maximize the sum of the radii, I'll refine the strategy by:
+
+1. **Optimizing Center Placement**: Instead of using a fixed hexagonal lattice with predefined positions, I'll generate a more flexible initial layout with a combination of hexagonal and clustered arrangements. This allows better utilization of both corners and edges.
+
+2. **Boundary Optimization**: Prioritize placing circles near the corners and edges to maximize their radius. This helps in reducing the "wasted" space near the square's boundaries.
+
+3. **Hybrid Packing Strategy**: Use a combination of hexagonal packing and dense clustering to fill gaps. The hexagonal arrangement provides good space efficiency, while dense clustering fills the remaining spaces in the corners and edges.
+
+4. **Improved Optimization Setup**: Use the SLSQP optimizer with tighter tolerances and more iterations, while also incorporating constraints directly into the optimization function. Ensure that all circles stay strictly inside the boundaries.
+
+5. **Refining Initial Guess for Radii**: Instead of using a simple minimum of distances, I'll compute a more accurate initial guess by considering both boundary distances and neighbor distances, weighted by their importance for packing density and boundary constraints.
+
+6. **Post-Optimization Validation and Repair**: After optimization, I'll validate the packing and if necessary, manually fix any out-of-bound or overlapping circles by adjusting their sizes or positions slightly.
+
+7. **Adaptive Sampling**: Use random sampling to generate alternative center configurations as initial guesses for optimization, trying a few different layouts to find the best possible solution.
+
+This strategy aims to balance between regular hexagonal packing and opportunistic clustering, ensuring we explore multiple potential configurations to achieve the best possible result.
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+
+def run_packing():
+    n = 26
+    
+    # Generate a hybrid initial layout with hexagonal packing and clustered corners
+    centers = []
+    
+    # Hexagonal base grid
+    row_spacing = 1 / np.sqrt(3)
+    col_spacing = 1 / np.sqrt(3)
+    rows = 5
+    cols = 6
+    max_circles = rows * cols
+    for row in range(rows):
+        for col in range(cols):
+            x = col * col_spacing
+            y = row * row_spacing
+            if row % 2 == 1:
+                x += col_spacing / 2
+            centers.append((x, y))
+    
+    # Add corner clusters
+    corner_clusters = [
+        [(0.1, 0.1), (0.2, 0.2), (0.3, 0.3)],  # Top-left corner
+        [(0.7, 0.1), (0.8, 0.2), (0.9, 0.3)],  # Top-right corner
+        [(0.1, 0.8), (0.2, 0.7), (0.3, 0.6)],  # Bottom-left corner
+        [(0.7, 0.8), (0.8, 0.7), (0.9, 0.6)]   # Bottom-right corner
+    ]
+    for cluster in corner_clusters:
+        centers.extend(cluster)
+    
+    # Add edge clusters
+    edge_clusters = [
+        [(0.25, 0.25), (0.35, 0.25), (0.45, 0.25)],  # Left edge
+        [(0.25, 0.75), (0.35, 0.75), (0.45, 0.75)],  # Right edge
+        [(0.25, 0.25), (0.25, 0.35), (0.25, 0.45)],  # Bottom edge
+        [(0.75, 0.25), (0.75, 0.35), (0.75, 0.45)]   # Top edge
+    ]
+    for cluster in edge_clusters:
+        centers.extend(cluster)
+    
+    # Remove extra circles and ensure we have exactly 26
+    centers = centers[:n]
+    if len(centers) < n:
+        centers += [(0.5, 0.5)] * (n - len(centers))
+    
+    # Convert to numpy array and normalize
+    centers = np.array(centers)
+    centers = centers / np.max(centers)  # Scale to [0,1]x[0,1]
+    
+    # Function to compute initial radii guess
+    def compute_initial_radii_guess(centers):
+        radii = np.zeros(len(centers))
+        for i in range(len(centers)):
+            # Distance to nearest boundary
+            dist_to_boundary = min(centers[i, 0], 1 - centers[i, 0], centers[i, 1], 1 - centers[i, 1])
+            
+            # Distance to nearest neighbor
+            min_dist_to_neighbor = np.inf
+            for j in range(len(centers)):
+                if i != j:
+                    dx = centers[i, 0] - centers[j, 0]
+                    dy = centers[i, 1] - centers[j, 1]
+                    dist = np.sqrt(dx**2 + dy**2)
+                    min_dist_to_neighbor = min(min_dist_to_neighbor, dist)
+            
+            # Set radius to smaller of boundary distance and half the neighbor distance
+            radii[i] = min(dist_to_boundary, min_dist_to_neighbor * 0.5)
+        return radii
+    
+    # Initial guess for radii
+    radii = compute_initial_radii_guess(centers)
+    
+    # Objective function: maximize sum of radii (negate for minimization)
+    def objective(x):
+        x = x.reshape((n,))
+        # Check if within bounds
+        for i in range(n):
+            if x[i] < 0:
+                return np.inf
+        # Check if any circle exceeds the unit square
+        for i in range(n):
+            x_i, y_i = centers[i]
+            r_i = x[i]
+            if x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12 or y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12:
+                return np.inf
+        # Check for overlaps
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist < x[i] + x[j] - 1e-12:
+                    return np.inf
+        return -np.sum(x)  # Negative for minimization
+    
+    # Optimization with better settings
+    result = optimize.minimize(
+        objective,
+        radii,
+        method='SLSQP',
+        bounds=[(0, 1) for _ in range(n)],
+        tol=1e-10,
+        options={'maxiter': 5000, 'ftol': 1e-12, 'eps': 1e-8}
+    )
+    
+    # Extract optimized radii
+    radii_opt = result.x
+    
+    # Final validation
+    valid, msg = validate_packing(centers, radii_opt)
+    if not valid:
+        # If not valid, adjust slightly
+        for i in range(n):
+            # Adjust x-boundary
+            if centers[i, 0] - radii_opt[i] < -1e-12 or centers[i, 0] + radii_opt[i] > 1 + 1e-12:
+                radii_opt[i] = max(0, min(1 - centers[i, 0], centers[i, 0]))
+            # Adjust y-boundary
+            if centers[i, 1] - radii_opt[i] < -1e-12 or centers[i, 1] + radii_opt[i] > 1 + 1e-12:
+                radii_opt[i] = max(0, min(1 - centers[i, 1], centers[i, 1]))
+    
+    # Final validation again
+    valid, msg = validate_packing(centers, radii_opt)
+    if not valid:
+        raise ValueError("Invalid packing after optimization")
+    
+    sum_radii = np.sum(radii_opt)
+    return centers, radii_opt, sum_radii
+```

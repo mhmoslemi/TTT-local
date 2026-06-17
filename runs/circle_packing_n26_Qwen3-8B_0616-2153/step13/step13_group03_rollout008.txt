@@ -1,0 +1,236 @@
+<strategy>
+To further improve the circle packing in the unit square for 26 circles, we can adopt a more refined and strategic approach, combining optimization techniques with geometric insight. Here's a step-by-step strategy:
+
+### 1. **Improve initial configurations**
+- We previously combined hexagonal, random, and corner centers. However, the optimal configuration for 26 circles may not follow a perfect hexagonal grid.
+- Instead, we can try a hybrid approach:
+  - Place circles in a hexagonal pattern in the interior.
+  - Allow some circles to be placed near the corners to maximize the use of the boundaries.
+  - Use more refined sampling of initial positions, perhaps using Latin hypercube sampling to ensure better coverage of the square.
+
+### 2. **Optimize boundary placement**
+- The current approach initializes radii based on the distance to the boundary. This is a good starting point, but we can improve it:
+  - Adaptively refine radii near boundaries and corners during the optimization steps.
+  - Give higher priority to circles placed near boundaries to maximize the total sum.
+
+### 3. **Alternative arrangements**
+- Try arranging the circles in a **hybrid grid + corner packing**:
+  - Use a hexagonal grid for the bulk of the circles.
+  - Add additional circles near the corners to utilize the unused space.
+
+### 4. **Multi-population optimization**
+- Use a multi-start optimization strategy with different initial seed configurations.
+- Include both random and structured (hexagonal, corner-based) initializations.
+- Use better optimization methods like `SLSQP` or `COBYLA` for better convergence.
+
+### 5. **Adaptive refinement**
+- After the initial optimization, refine the positions of circles that are close to the boundaries and corners.
+- Perform a final small-scale perturbation and re-optimization focusing on boundary circles.
+
+### 6. **Geometric insights and constraints**
+- Add geometric constraints such as circle centers being at least one radius away from the corners and edges.
+- Allow for slight flexibility in the constraints to avoid premature convergence.
+
+### 7. **Refined objective function**
+- Ensure that the objective function is well-posed and that the optimization is directed towards maximizing the total radius.
+
+</strategy>
+
+```python
+import numpy as np
+import scipy.optimize as optimize
+import random
+from typing import Tuple, List, Any
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12
+                or y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+
+def objective_function(params, n_circles):
+    centers = params[:n_circles * 2].reshape((n_circles, 2))
+    radii = params[n_circles * 2:].reshape((n_circles,))
+    return -np.sum(radii)
+
+def constraint_function(params, n_circles):
+    centers = params[:n_circles * 2].reshape((n_circles, 2))
+    radii = params[n_circles * 2:].reshape((n_circles,))
+
+    constraints = []
+
+    # Boundary constraints
+    for i in range(n_circles):
+        x, y = centers[i]
+        r = radii[i]
+        # x - r >= 0
+        constraints.append((x - r) * 1e4)
+        # x + r <= 1
+        constraints.append((1 - x - r) * 1e4)
+        # y - r >= 0
+        constraints.append((y - r) * 1e4)
+        # y + r <= 1
+        constraints.append((1 - y - r) * 1e4)
+
+    # Circle-circle constraints
+    for i in range(n_circles):
+        for j in range(i + 1, n_circles):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            constraints.append((dist - (radii[i] + radii[j])) * 1e4)
+
+    return constraints
+
+def generate_hexagonal_centers(n_circles):
+    centers = []
+    for i in range(n_circles):
+        x = i * 0.2 + 0.1
+        y = (i // 10) * 0.2 * np.sqrt(3) + 0.1
+        if i % 10 == 0:
+            y += 0.1
+        centers.append([x, y])
+    return np.array(centers)
+
+def generate_corner_centers(n_circles):
+    corners = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)]
+    centers = []
+    for _ in range(n_circles):
+        x, y = random.choice(corners)
+        centers.append([x, y])
+    return np.array(centers)
+
+def generate_random_centers(n_circles):
+    centers = []
+    for _ in range(n_circles):
+        x = np.random.uniform(0.1, 0.9)
+        y = np.random.uniform(0.1, 0.9)
+        centers.append([x, y])
+    return np.array(centers)
+
+def generate_latin_hypercube_centers(n_circles):
+    centers = []
+    for _ in range(n_circles):
+        x = np.random.uniform(0.1, 0.9)
+        y = np.random.uniform(0.1, 0.9)
+        centers.append([x, y])
+    return np.array(centers)
+
+def combine_centers(hex_centers, random_centers, corner_centers, n_circles):
+    combined = np.vstack([hex_centers, random_centers, corner_centers])
+    if combined.shape[0] > n_circles:
+        combined = combined[:n_circles]
+    return combined
+
+def optimize_packing(n_circles, method="SLSQP", seed=None):
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    # Generate multiple initial configurations
+    hex_centers = generate_hexagonal_centers(n_circles)
+    random_centers = generate_random_centers(n_circles)
+    corner_centers = generate_corner_centers(n_circles)
+    initial_centers = combine_centers(hex_centers, random_centers, corner_centers, n_circles)
+
+    # Initialize radii
+    radii = np.zeros(n_circles)
+    for i in range(n_circles):
+        x, y = initial_centers[i]
+        dist_to_boundary = min(x, 1 - x, y, 1 - y)
+        if dist_to_boundary > 0:
+            radii[i] = min(0.15, dist_to_boundary * 0.5)
+
+    initial_params = np.concatenate([initial_centers.flatten(), radii])
+
+    bounds = []
+    for _ in range(n_circles * 2):
+        bounds.append((0, 1))
+    for _ in range(n_circles):
+        bounds.append((0, 1))
+
+    result = optimize.minimize(
+        fun=lambda x: objective_function(x, n_circles),
+        x0=initial_params,
+        bounds=bounds,
+        constraints={"type": "ineq", "fun": lambda x: constraint_function(x, n_circles)},
+        method=method
+    )
+
+    centers_opt = result.x[:n_circles * 2].reshape((n_circles, 2))
+    radii_opt = result.x[n_circles * 2:].reshape((n_circles,))
+
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        return np.array([]), np.array([])
+
+    centers, radii = centers_opt, radii_opt
+
+    # Adaptive refinement around corners and edges
+    for _ in range(3):
+        idxs = np.argsort(np.sum((centers - np.array([0.5, 0.5])) ** 2, axis=1))[:n_circles // 2]
+        for i in idxs:
+            x, y = centers[i]
+            dist_to_boundary = min(x, 1 - x, y, 1 - y)
+            if dist_to_boundary > 0:
+                radii[i] = min(0.15, dist_to_boundary * 0.5)
+
+    new_params = np.concatenate([centers.flatten(), radii])
+    result = optimize.minimize(
+        fun=lambda x: objective_function(x, n_circles),
+        x0=new_params,
+        bounds=bounds,
+        constraints={"type": "ineq", "fun": lambda x: constraint_function(x, n_circles)},
+        method=method
+    )
+
+    centers_opt = result.x[:n_circles * 2].reshape((n_circles, 2))
+    radii_opt = result.x[n_circles * 2:].reshape((n_circles,))
+
+    is_valid, message = validate_packing(centers_opt, radii_opt)
+    if not is_valid:
+        return np.array([]), np.array([])
+
+    return centers_opt, radii_opt
+
+def run_packing() -> Tuple[np.ndarray, np.ndarray, float]:
+    n_circles = 26
+    best_centers = None
+    best_radii = None
+    best_sum = 0.0
+
+    for seed in range(15):  # Try 15 different initial seeds
+        centers_opt, radii_opt = optimize_packing(n_circles, method="SLSQP", seed=seed)
+        if centers_opt.size == 0 or radii_opt.size == 0:
+            continue
+        is_valid, message = validate_packing(centers_opt, radii_opt)
+        if not is_valid:
+            continue
+        sum_radii = np.sum(radii_opt)
+        if sum_radii > best_sum:
+            best_centers = centers_opt
+            best_radii = radii_opt
+            best_sum = sum_radii
+
+    if best_centers is None or best_radii is None:
+        return np.array([]), np.array([]), 0.0
+
+    return best_centers, best_radii, best_sum
+```
