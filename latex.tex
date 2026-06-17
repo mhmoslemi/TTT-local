@@ -1,0 +1,82 @@
+% ======================================================================
+% RL algorithm definitions (single-step contextual-bandit framing)
+% Requires: \usepackage{amsmath}
+% ======================================================================
+
+\paragraph{Setup.}
+Each optimization step samples one parent state $s$, draws $G=64$ i.i.d.\ full
+programs $a_i \sim \pi_\theta(\cdot \mid s)$, and assigns each a single terminal
+scalar reward $R_i$. This is a one-step contextual bandit rather than a
+multi-step MDP, so all three baselines reduce to score-function (REINFORCE-style)
+estimators that differ only in how the advantage is formed. The action is the
+entire token sequence, and the policy factorizes per token, so
+\begin{equation}
+  \nabla_\theta \log \pi_\theta(a \mid s)
+  = \sum_{t} \nabla_\theta \log \pi_\theta\!\left(a_t \mid s, a_{<t}\right).
+\end{equation}
+
+\paragraph{REINFORCE (with a group baseline).}
+The classic score-function policy gradient,
+$\nabla_\theta J = \mathbb{E}\!\left[A \cdot \nabla_\theta \log \pi_\theta(a \mid s)\right]$,
+using the group mean as a variance-reduction baseline and the within-group
+$z$-score as the advantage,
+\begin{equation}
+  A_i = \frac{R_i - \operatorname{mean}_g(R)}{\operatorname{std}_g(R) + \varepsilon},
+\end{equation}
+which is exactly the GRPO advantage. There is no critic, no clipping, and a
+single gradient step per batch. The estimator is mean-seeking: a rollout is
+upweighted in proportion to how many standard deviations it lies above the group
+average, so a single outlier-good construction receives only modest, normalized
+reinforcement. It is unbiased given the baseline, since
+$\mathbb{E}\!\left[b \cdot \nabla_\theta \log \pi_\theta\right] = 0$, but it has
+the highest variance of the three.
+
+\paragraph{A2C (advantage actor--critic).}
+The same score-function gradient, but with a \emph{learned} state-value baseline
+$V_\phi(s)$ in place of the batch statistic,
+\begin{equation}
+  A_i = R_i - V_\phi(s).
+\end{equation}
+Two coupled objectives are optimized: the actor ascends
+$A_i \nabla_\theta \log \pi_\theta$, while the critic descends the regression loss
+$\bigl(V_\phi(s) - R\bigr)^2$ toward the expected return. The general-MDP
+advantage $r + \gamma V(s') - V(s)$ collapses here because there is no successor
+state and no bootstrapping ($\gamma$ is irrelevant and every episode is one step
+to termination), so $V_\phi(s)$ simply learns $\mathbb{E}[R \mid s]$ and the
+advantage becomes $R - \mathbb{E}[R \mid s]$. The theoretical appeal over
+REINFORCE is that a learned $V_\phi(s)$ generalizes across states and supplies a
+baseline even for a state sampled only once. The asynchronous/synchronous
+parallel-actor aspect of the A3C/A2C family maps onto the generation pool, but
+the substantive difference from REINFORCE is purely learned-baseline versus
+batch-baseline.
+
+\paragraph{PPO (proximal policy optimization).}
+The same advantage estimator as the REINFORCE control (the $z$-scored group
+advantage), but with an off-policy correction and a trust-region bound so that
+multiple gradient epochs can be taken over a single rollout buffer. Defining the
+per-token probability ratio against the snapshot policy that generated the
+rollouts, $r_t(\theta) = \pi_\theta(a_t) / \pi_{\theta_{\mathrm{old}}}(a_t)$, the
+clipped surrogate is maximized:
+\begin{equation}
+  L(\theta) = \mathbb{E}_t\!\left[
+    \min\!\Bigl(r_t(\theta)\, A,\;
+    \operatorname{clip}\!\bigl(r_t(\theta),\, 1-\epsilon,\, 1+\epsilon\bigr)\, A
+    \Bigr)
+  \right].
+\end{equation}
+The clip is a first-order proxy for TRPO's KL trust region: it removes the
+incentive to move the ratio beyond $1 \pm \epsilon$ on any token, so reusing the
+batch for several epochs cannot push the policy far from the distribution that
+produced the samples. The payoff is sample reuse with stability; the cost, on a
+best-of metric, is that the clip deliberately throttles the per-step update.
+Importance sampling also legitimizes the mild off-policyness already present:
+the generation pool samples from a step-start snapshot shared across several
+groups, so $r_t \neq 1$ even within a step, and the clipped ratio is the
+principled correction.
+
+\paragraph{Through-line.}
+REINFORCE and PPO share a linear, mean-seeking advantage and differ only in
+off-policy reuse and the trust region; A2C swaps the baseline source; and all
+three are linear, whereas the entropic (TTT) objective is exponential and
+max-seeking, which is the underlying reason it dominates on a metric that rewards
+only the single best construction found.
