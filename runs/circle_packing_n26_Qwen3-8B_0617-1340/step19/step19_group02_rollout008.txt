@@ -1,0 +1,193 @@
+<strategy>
+To improve the circle packing in a unit square, we can follow a strategy that focuses on optimizing both spatial distribution and radii allocation. Here's a structured breakdown of my approach:
+
+1. **Optimal Placement Near Boundaries and Corners**: 
+   - Current setup places circles near corners and edges with fixed radii. However, optimal placement should allow for dynamic adjustment of radii depending on local availability of space. To do this, I'll consider placing some circles at corners with larger radii and then optimizing their positions and radii to utilize available space effectively.
+
+2. **Hexagonal Packing with Adaptive Adjustments**:
+   - A hexagonal grid is known to be optimal for circle packing in infinite space. However, in a bounded space like a unit square, adjustments are needed. I'll use a hexagonal grid as a base layout but allow for perturbations and refinements to adapt to the square boundaries and maximize the sum of radii.
+
+3. **Refining the Search Space**:
+   - I'll implement a more sophisticated optimization strategy that includes a hybrid approach: starting with a hexagonal grid, then using an evolutionary algorithm (genetic algorithm) for global exploration, followed by local optimization using SLSQP or COBYLA. This will help avoid local minima and find better maxima.
+
+4. **Adaptive Constraint Handling**:
+   - A non-overlapping constraint will be enforced with a tolerance, and I'll introduce a penalty function to allow slightly overlapping circles in early stages of the optimization to avoid premature convergence. This will help in finding better solutions where minor overlaps can be resolved in later stages.
+
+5. **Refined Initialization**:
+   - I'll place some circles at strategic positions (corners, edges) with initial larger radii, and place the rest randomly with smaller initial radii. This ensures we start close to a feasible solution.
+
+6. **Multi-Stage Optimization**:
+   - Use a multi-stage optimization approach:
+     - Initialization with a hexagonal grid.
+     - Genetic Algorithm to explore different configurations.
+     - SLSQP for fine-tuning the radii and positions.
+
+7. **Validation**:
+   - After optimization, validation will ensure that all circles remain inside the unit square and do not overlap.
+</strategy>
+
+```python
+import numpy as np
+from scipy.optimize import minimize, Bounds, NonlinearConstraint
+from scipy.optimize import differential_evolution
+import matplotlib.pyplot as plt
+
+def run_packing():
+    n = 26
+
+    # Initial layout with hexagonal packing and strategic placement
+    def initial_layout(n):
+        # Generate hexagonal grid layout
+        row_count = int(np.ceil(np.sqrt(n)))
+        col_count = int(np.ceil(n / row_count))
+        spacing = 0.2
+
+        centers = np.zeros((n, 2))
+        radii = np.zeros(n)
+        index = 0
+
+        for row in range(row_count):
+            for col in range(col_count):
+                if index >= n:
+                    break
+                x = col * spacing + spacing / 2 + (row % 2) * spacing / 2
+                y = row * spacing * np.sqrt(3) / 2 + spacing / 2
+                x = np.clip(x, spacing * 0.3, 1 - spacing * 0.3)
+                y = np.clip(y, spacing * 0.3, 1 - spacing * 0.3)
+                centers[index] = [x, y]
+                radii[index] = spacing * 0.1
+                index += 1
+
+        # Add corner and edge circles with larger radii
+        corner_positions = [(0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9)]
+        edge_positions = [
+            (0.5, 0.1), (0.5, 0.9),
+            (0.1, 0.5), (0.9, 0.5)
+        ]
+        for pos in corner_positions + edge_positions:
+            if index < n:
+                centers[index] = [pos[0], pos[1]]
+                radii[index] = spacing * 0.2
+                index += 1
+
+        # Distribute remaining circles with perturbations
+        for i in range(index, n):
+            x = np.random.uniform(0.1, 0.9)
+            y = np.random.uniform(0.1, 0.9)
+            x += np.random.uniform(-0.05, 0.05)
+            y += np.random.uniform(-0.05, 0.05)
+            x = np.clip(x, 0.1, 0.9)
+            y = np.clip(y, 0.1, 0.9)
+            centers[i] = [x, y]
+            radii[i] = spacing * 0.1
+
+        return centers, radii
+
+    # Generate initial positions and radii
+    centers, radii = initial_layout(n)
+
+    # Objective function: maximize sum of radii
+    def objective(x):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        return -np.sum(radii)  # Negative for minimization
+
+    # Constraint: circles must be within the unit square and not overlap
+    def constraints(x):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        # Check boundary constraints
+        for i in range(n):
+            x_i, y_i = centers[i]
+            r_i = radii[i]
+            if (x_i - r_i < -1e-12 or x_i + r_i > 1 + 1e-12 or
+                y_i - r_i < -1e-12 or y_i + r_i > 1 + 1e-12):
+                return np.inf
+        # Check non-overlapping constraints
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist < radii[i] + radii[j] - 1e-12:
+                    return np.inf
+        return 0
+
+    # Flatten centers and radii for optimization
+    x0 = np.concatenate([centers.ravel(), radii])
+
+    # Bounds: centers must be in [0,1], radii must be >= 0
+    bounds = Bounds(np.zeros(2*n + n), np.ones(2*n + n))
+
+    # Stage 1: Differential Evolution for global exploration
+    def objective_de(x):
+        return -objective(x)
+
+    result_de = differential_evolution(
+        objective_de,
+        bounds=np.vstack([np.zeros(2*n + n), np.ones(2*n + n)]).T,
+        strategy='best1bin',
+        popsize=15,
+        tol=1e-6,
+        mutation=(0.5, 1),
+        recombination=0.8,
+        polish=True,
+        disp=False,
+        maxiter=200
+    )
+
+    # Stage 2: Local optimization with SLSQP
+    def constraints_slsqp(x):
+        return constraints(x)
+
+    result_slsqp = minimize(
+        objective,
+        result_de.x,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=NonlinearConstraint(constraints_slsqp, 0, 1e-6),
+        options={
+            'disp': False,
+            'ftol': 1e-9,
+            'maxiter': 2000,
+            'eps': 1e-8
+        }
+    )
+
+    # Extract results
+    centers_opt = result_slsqp.x[:2*n].reshape(n, 2)
+    radii_opt = result_slsqp.x[2*n:]
+
+    # Validate packing
+    valid, msg = validate_packing(centers_opt, radii_opt)
+    if not valid:
+        raise ValueError(f"Packing is invalid: {msg}")
+
+    sum_radii = np.sum(radii_opt)
+    return centers_opt, radii_opt, sum_radii
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-12 or x + r > 1 + 1e-12 or
+                y - r < -1e-12 or y + r > 1 + 1e-12):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-12:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```

@@ -1,0 +1,201 @@
+<strategy>
+To improve the circle packing of 26 circles within the unit square to achieve a higher sum of radii (target 2.636), I'll adopt a more refined strategy. The previous algorithm used a hybrid grid and corner optimization, but it still has room for improvement.
+
+Here's my strategy:
+
+1. **Optimal Corner and Boundary Arrangement**: The corners and edges of a square provide more space for larger circles. I'll place larger circles at the corners and carefully arrange smaller circles along the edges to maximize spacing.
+
+2. **Hybrid Hexagonal and Grid Layout**: I'll build an initial packing using a near-hexagonal grid in the center of the square. Hexagonal packing is the densest regular packing and often yields better results.
+
+3. **Refined Initial Layout**: Instead of randomly placing the remaining circles, I'll use a more systematic method to fill gaps. For example, place circles along the boundaries and in the corners, ensuring they don't overlap with the central grid and each other.
+
+4. **Multi-Stage Optimization with Improved Parameters**: I'll perform a first-stage optimization using a constrained method like SLSQP, then refocus using a method like COBYLA to fine-tune the centers and radii. I'll set tighter tolerances and increase the number of iterations for better convergence.
+
+5. **Dynamic Radius Adjustment**: Instead of using a fixed radius for all circles, I'll allow the optimization to adjust radii based on the spacing to the nearest neighbors, ensuring the best possible packing density.
+
+6. **Boundary and Corner Constraints**: I'll incorporate tighter constraints for circles near the edges and corners to prevent them from extending outside the square. This ensures better placement of larger circles.
+
+7. **Random Perturbation in Final Optimization**: I'll introduce small random perturbations during the final optimization to avoid local maxima and find a better global solution.
+
+8. **Validation and Refinement**: After obtaining a result, I'll validate it against the existing constraints and refine it if necessary. This includes checking for overlap, boundary constraints, and optimizing the radii further.
+
+By combining these techniques, I expect to achieve a higher total sum of radii closer to the target of 2.636.
+</strategy>
+
+```python
+import numpy as np
+from scipy.optimize import minimize, Bounds, NonlinearConstraint
+import matplotlib.pyplot as plt
+
+def run_packing():
+    n = 26
+
+    # Create a refined initial layout with hexagonal packing and corner optimization
+    def initial_layout(n):
+        # Define a hexagonal grid with some room for growth
+        rows = int(np.ceil(np.sqrt(n)))
+        cols = int(np.ceil(n / rows))
+        spacing = 1.0 / (cols + 1)
+        edge_radius = spacing / 2
+        centers = np.zeros((n, 2))
+        radii = np.zeros(n)
+        index = 0
+
+        for row in range(rows):
+            for col in range(cols):
+                if index >= n:
+                    break
+                # Create alternating row offsets to simulate hexagonal packing
+                x = col * spacing + spacing / 2 + (row % 2) * spacing / 2
+                y = row * spacing * np.sqrt(3) / 2 + spacing / 2
+                centers[index] = [x, y]
+                radii[index] = edge_radius
+                index += 1
+
+        # Add larger circles at the corners with increased radii
+        corner_radius = edge_radius * 1.5
+        corners = [(0.1, 0.1), (0.1, 0.9), (0.9, 0.1), (0.9, 0.9)]
+        for i, (x, y) in enumerate(corners):
+            if index < n:
+                centers[index] = [x, y]
+                radii[index] = corner_radius
+                index += 1
+
+        # Add remaining circles with slight randomness for better spacing
+        remaining = n - index
+        if remaining > 0:
+            for i in range(remaining):
+                spacing = np.sqrt(1.0 / (n - index))
+                x = np.random.uniform(0.1, 0.9)
+                y = np.random.uniform(0.1, 0.9)
+                centers[index] = [x, y]
+                radii[index] = edge_radius
+                index += 1
+
+        return centers, radii
+
+    # Generate initial positions and radii
+    centers, radii = initial_layout(n)
+
+    # Objective function: maximize sum of radii
+    def objective(x):
+        # x is a concatenated array of centers and radii
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+        return -np.sum(radii)  # Negative for minimization
+
+    # Constraint: circles must be within the unit square and not overlap
+    def constraints(x):
+        centers = x[:2*n].reshape(n, 2)
+        radii = x[2*n:]
+
+        # Check boundary constraints
+        for i in range(n):
+            x_i, y_i = centers[i]
+            r_i = radii[i]
+            if (x_i - r_i < -1e-8 or x_i + r_i > 1 + 1e-8 or
+                y_i - r_i < -1e-8 or y_i + r_i > 1 + 1e-8):
+                return np.inf
+
+        # Check non-overlapping constraints
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = centers[i, 0] - centers[j, 0]
+                dy = centers[i, 1] - centers[j, 1]
+                dist = np.sqrt(dx**2 + dy**2)
+                if dist < radii[i] + radii[j] - 1e-8:
+                    return np.inf
+
+        return 0
+
+    # Flatten centers and radii for optimization
+    x0 = np.concatenate([centers.ravel(), radii])
+
+    # Bounds: centers must be in [0,1], radii must be >= 0
+    bounds = Bounds(np.zeros(2*n + n), np.ones(2*n + n))
+
+    # Multi-stage optimization with tighter constraints and better refinement
+    # First stage: SLSQP with tight constraints
+    result_slsqp = minimize(
+        objective,
+        x0,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=NonlinearConstraint(constraints, 0, 1e-6),
+        options={
+            'disp': False,
+            'ftol': 1e-9,
+            'maxiter': 1000
+        }
+    )
+
+    # Second stage: COBYLA with refined starting point
+    result_cobyla = minimize(
+        objective,
+        result_slsqp.x,
+        method='Cobyla',
+        bounds=bounds,
+        constraints=NonlinearConstraint(constraints, 0, 1e-6),
+        options={
+            'disp': False,
+            'rhobeg': 0.2,
+            'rhoend': 1e-4,
+            'maxiter': 5000
+        }
+    )
+
+    # Third stage: SLSQP with even tighter constraints
+    result_slsqp2 = minimize(
+        objective,
+        result_cobyla.x,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=NonlinearConstraint(constraints, 0, 1e-8),
+        options={
+            'disp': False,
+            'ftol': 1e-10,
+            'maxiter': 1000
+        }
+    )
+
+    # Ensure a valid result
+    if not result_slsqp2.success:
+        raise ValueError("Optimization failed")
+
+    # Extract results
+    centers_opt = result_slsqp2.x[:2*n].reshape(n, 2)
+    radii_opt = result_slsqp2.x[2*n:]
+
+    # Validate packing
+    valid, msg = validate_packing(centers_opt, radii_opt)
+    if not valid:
+        raise ValueError(f"Packing is invalid: {msg}")
+
+    sum_radii = np.sum(radii_opt)
+    return centers_opt, radii_opt, sum_radii
+
+def validate_packing(centers, radii):
+    n = centers.shape[0]
+
+    if np.isnan(centers).any() or np.isnan(radii).any():
+        return False, "NaN values present"
+
+    for i in range(n):
+        if radii[i] < 0:
+            return False, f"Circle {i} has negative radius {radii[i]}"
+
+    for i in range(n):
+        x, y = centers[i]
+        r = radii[i]
+        if (x - r < -1e-8 or x + r > 1 + 1e-8 or
+                y - r < -1e-8 or y + r > 1 + 1e-8):
+            return False, f"Circle {i} at ({x},{y}) r={r} outside unit square"
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = np.sqrt(np.sum((centers[i] - centers[j]) ** 2))
+            if dist < radii[i] + radii[j] - 1e-8:
+                return False, f"Circles {i} and {j} overlap"
+
+    return True, "ok"
+```
