@@ -11,7 +11,7 @@ Circle packing.
 from __future__ import annotations
 import inspect
 from typing import Any, List
-import numpy as np
+import numpy as np # type: ignore
 
 from problems.base import (
     Problem, ParentContext, RewardResult, SeedState, render_state_context,
@@ -112,19 +112,7 @@ Make sure to /think step by step, first give your strategy between <strategy> an
         )
         return prelude + "\n# ---- model code below ----\n" + code
 
-    # ------------------------------------------------------------------
-    # def score(self, output: Any, stdout: str) -> RewardResult:
-    #     res = RewardResult(reward=self.fail_score)
-    #     if not (isinstance(output, tuple) and len(output) == 3):
-    #         res.msg = "bad_return_shape"
-    #         return res
-    #     centers, radii, _ = output
-    #     centers = np.asarray(centers)
-    #     radii = np.asarray(radii).ravel()
 
-    #     if centers.ndim != 2 or centers.shape[1] != 2 or centers.shape[0] != self.num_circles:
-    #         res.msg = f"bad_centers_shape: {centers.shape}"
-    #         return res
 
     def score(self, output: Any, stdout: str) -> RewardResult:
         res = RewardResult(reward=self.fail_score)

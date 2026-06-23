@@ -127,9 +127,8 @@ for s in $STEPS; do
             >> "$step_dir/summary.txt"
 
         echo "$s,$rank,$reward,$group,$rollout,$valid,\"$msg\",$txt_file" >> "$OUT_DIR/all_top3.csv"
-    done
-done
-
-echo ""
+    
+    
+    echo ""
 echo "Done. Output written to: $OUT_DIR/"
 echo "Global summary CSV:      $OUT_DIR/all_top3.csv"
